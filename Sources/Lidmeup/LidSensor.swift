@@ -1,180 +1,191 @@
 import Foundation
 import IOKit
+import IOKit.hid
 
-/// Reads the MacBook's ambient light sensor (ALS) via IOKit to estimate lid openness.
-/// As the lid closes, less ambient light reaches the sensor, so the reading decreases.
-/// We map this to a percentage: 0% = closed, 100% = fully open.
-final class LidSensor: ObservableObject {
-    @Published var percentage: Double = 100.0
-    @Published var rawLightValue: UInt64 = 0
-    @Published var isCalibrated: Bool = false
-    @Published var sensorAvailable: Bool = true
-    @Published var statusMessage: String = "Starting..."
+/// Reads the MacBook's lid angle sensor via IOKit HID.
+/// Based on https://github.com/samhenrigold/LidAngleSensor
+///
+/// Accesses the HID device with usage page 0x0020, usage 0x008A
+/// and reads the raw angle from bytes 1-2 of the feature report.
+@Observable
+final class LidSensor {
+    private(set) var angle: Double = 120.0
+    private(set) var velocity: Double = 0.0
+    private(set) var isAvailable: Bool = false
+    private(set) var statusMessage: String = "Starting..."
+
+    /// Angle as a percentage (0% = closed at 0 deg, 100% = fully open at ~130 deg)
+    var percentage: Double {
+        min(100, max(0, angle / 130.0 * 100.0))
+    }
+
+    var status: String {
+        switch angle {
+        case ..<5:     return "Closed"
+        case 5..<45:   return "Slightly Open"
+        case 45..<90:  return "Half Open"
+        case 90..<120: return "Mostly Open"
+        default:       return "Fully Open"
+        }
+    }
+
+    // Smoothing factors
+    private let angleSmoothingFactor = 0.05
+    private let velocitySmoothingFactor = 0.30
 
     private var timer: Timer?
-    private var connection: io_connect_t = 0
-    private var serviceOpen: Bool = false
+    private var hidDevice: IOHIDDevice?
+    private var reportID: UInt32 = 0
+    private var reportLength: Int = 0
+    private var lastAngle: Double = 120.0
+    private var lastTimestamp: TimeInterval = 0
 
-    // Calibration values
-    private var minLight: UInt64 = 0       // Light reading when lid is closed
-    private var maxLight: UInt64 = 500_000 // Light reading when lid is fully open (default)
-
-    private let calibrationKey = "lidmeup_calibration"
-
-    init() {
-        loadCalibration()
-        openSensor()
-    }
+    init() {}
 
     deinit {
-        stopMonitoring()
-        closeSensor()
+        stop()
     }
 
-    // MARK: - IOKit Sensor Access
+    // MARK: - Lifecycle
 
-    private func openSensor() {
-        let serviceDict = IOServiceMatching("AppleLMUController")
-        let service = IOServiceGetMatchingService(kIOMainPortDefault, serviceDict)
-
-        guard service != IO_OBJECT_NULL else {
-            DispatchQueue.main.async {
-                self.sensorAvailable = false
-                self.statusMessage = "No ambient light sensor found. Is this a MacBook?"
-            }
+    func start() {
+        guard hidDevice == nil else { return }
+        findSensor()
+        guard hidDevice != nil else {
+            statusMessage = "Lid angle sensor not found. Is this a supported MacBook?"
+            isAvailable = false
             return
         }
 
-        let result = IOServiceOpen(service, mach_task_self_, 0, &connection)
-        IOObjectRelease(service)
+        isAvailable = true
+        statusMessage = "Sensor connected"
+        lastTimestamp = ProcessInfo.processInfo.systemUptime
 
-        if result == KERN_SUCCESS {
-            serviceOpen = true
-            DispatchQueue.main.async {
-                self.statusMessage = "Sensor connected"
-            }
-        } else {
-            DispatchQueue.main.async {
-                self.sensorAvailable = false
-                self.statusMessage = "Could not open light sensor (error: \(result))"
-            }
-        }
-    }
-
-    private func closeSensor() {
-        if serviceOpen {
-            IOServiceClose(connection)
-            serviceOpen = false
-        }
-    }
-
-    private func readLightSensor() -> UInt64? {
-        guard serviceOpen else { return nil }
-
-        var outputCount: UInt32 = 2
-        var values = [UInt64](repeating: 0, count: 2)
-
-        let result = IOConnectCallMethod(
-            connection,
-            0,           // selector for getLightSensorReading
-            nil, 0,      // no scalar input
-            nil, 0,      // no struct input
-            &values, &outputCount,  // scalar output
-            nil, nil     // no struct output
-        )
-
-        guard result == KERN_SUCCESS else { return nil }
-
-        // values[0] is the left sensor, values[1] is the right sensor
-        // Average both sensors for a more stable reading
-        return (values[0] + values[1]) / 2
-    }
-
-    // MARK: - Monitoring
-
-    func startMonitoring() {
-        timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            self?.updateReading()
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            self?.poll()
         }
         RunLoop.current.add(timer!, forMode: .common)
     }
 
-    func stopMonitoring() {
+    func stop() {
         timer?.invalidate()
         timer = nil
+        hidDevice = nil
     }
 
-    private func updateReading() {
-        guard let lightValue = readLightSensor() else {
+    // MARK: - HID Sensor Discovery
+
+    private func findSensor() {
+        // Try standard sensor first (usage page 0x0020, usage 0x008A)
+        if let device = findStandardSensor() {
+            hidDevice = device
             return
         }
+        // Fallback: vendor-specific device 0x8104
+        if let device = findVendorSpecificSensor() {
+            hidDevice = device
+            return
+        }
+    }
 
-        DispatchQueue.main.async { [self] in
-            self.rawLightValue = lightValue
+    private func findStandardSensor() -> IOHIDDevice? {
+        let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+        IOHIDManagerSetDeviceMatching(manager, nil)
+        IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
 
-            // Dynamically update maxLight if we see a higher value
-            if lightValue > self.maxLight && self.isCalibrated {
-                self.maxLight = lightValue
-                self.saveCalibration()
+        guard let deviceSet = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice> else {
+            return nil
+        }
+
+        for device in deviceSet {
+            guard let elements = IOHIDDeviceCopyMatchingElements(device, nil, IOOptionBits(kIOHIDOptionsTypeNone)) as? [IOHIDElement] else {
+                continue
             }
 
-            // Calculate percentage
-            let range = Double(self.maxLight) - Double(self.minLight)
-            if range > 0 {
-                let normalized = (Double(lightValue) - Double(self.minLight)) / range
-                self.percentage = min(100, max(0, normalized * 100))
-            } else {
-                self.percentage = lightValue > 0 ? 100 : 0
+            for element in elements {
+                let usagePage = IOHIDElementGetUsagePage(element)
+                let usage = IOHIDElementGetUsage(element)
+
+                if usagePage == 0x0020 && usage == 0x008A {
+                    let rid = IOHIDElementGetReportID(element)
+                    self.reportID = UInt32(rid)
+                    // Determine report length from device
+                    self.reportLength = 64 // Default; will be overridden if needed
+                    statusMessage = "Found standard lid angle sensor"
+                    return device
+                }
             }
-
-            self.statusMessage = "Monitoring lid position..."
         }
+
+        return nil
     }
 
-    // MARK: - Calibration
+    private func findVendorSpecificSensor() -> IOHIDDevice? {
+        let matching: [String: Any] = [
+            kIOHIDDeviceUsagePageKey: 0xFF00,
+            kIOHIDDeviceUsageKey: 0x0001,
+        ]
+        let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+        IOHIDManagerSetDeviceMatching(manager, matching as CFDictionary)
+        IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
 
-    func calibrateOpen() {
-        guard let value = readLightSensor() else { return }
-        DispatchQueue.main.async {
-            self.maxLight = max(value, 1) // Avoid zero
-            self.isCalibrated = true
-            self.saveCalibration()
-            self.statusMessage = "Open position calibrated (\(value))"
+        guard let deviceSet = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice> else {
+            return nil
         }
-    }
 
-    func calibrateClosed() {
-        guard let value = readLightSensor() else { return }
-        DispatchQueue.main.async {
-            self.minLight = value
-            self.isCalibrated = true
-            self.saveCalibration()
-            self.statusMessage = "Closed position calibrated (\(value))"
+        for device in deviceSet {
+            let productID = IOHIDDeviceGetProperty(device, kIOHIDProductIDKey as CFString) as? Int
+            if productID == 0x8104 {
+                self.reportID = 0
+                self.reportLength = 64
+                statusMessage = "Found vendor-specific lid angle sensor"
+                return device
+            }
         }
+
+        return nil
     }
 
-    func resetCalibration() {
-        DispatchQueue.main.async {
-            self.minLight = 0
-            self.maxLight = 500_000
-            self.isCalibrated = false
-            UserDefaults.standard.removeObject(forKey: self.calibrationKey)
-            self.statusMessage = "Calibration reset"
+    // MARK: - Polling
+
+    private func poll() {
+        guard let device = hidDevice else { return }
+
+        var report = [UInt8](repeating: 0, count: reportLength)
+        var length = CFIndex(reportLength)
+
+        let result = IOHIDDeviceGetReport(
+            device,
+            kIOHIDReportTypeFeature,
+            CFIndex(reportID),
+            &report,
+            &length
+        )
+
+        guard result == kIOReturnSuccess, length >= 3 else { return }
+
+        // Raw angle from bytes 1-2 (little-endian 16-bit)
+        let rawAngle = Double(UInt16(report[1]) | (UInt16(report[2]) << 8))
+
+        let now = ProcessInfo.processInfo.systemUptime
+        let dt = now - lastTimestamp
+        lastTimestamp = now
+
+        // Exponential smoothing on angle
+        let smoothedAngle = lastAngle + angleSmoothingFactor * (rawAngle - lastAngle)
+
+        // Velocity calculation
+        if dt > 0 {
+            let rawVelocity = abs(smoothedAngle - lastAngle) / dt
+            velocity = velocity + velocitySmoothingFactor * (rawVelocity - velocity)
         }
-    }
 
-    private func saveCalibration() {
-        let data: [String: UInt64] = ["min": minLight, "max": maxLight]
-        UserDefaults.standard.set(data, forKey: calibrationKey)
-    }
+        // Decay velocity when not moving
+        if abs(rawAngle - lastAngle) < 0.5 {
+            velocity *= 0.5
+        }
 
-    private func loadCalibration() {
-        guard let data = UserDefaults.standard.dictionary(forKey: calibrationKey),
-              let min = data["min"] as? UInt64,
-              let max = data["max"] as? UInt64 else { return }
-        minLight = min
-        maxLight = max
-        isCalibrated = true
+        lastAngle = smoothedAngle
+        angle = smoothedAngle
     }
 }

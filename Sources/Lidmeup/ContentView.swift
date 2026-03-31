@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct ContentView: View {
-    @StateObject private var sensor = LidSensor()
+    @State private var sensor = LidSensor()
 
     var body: some View {
         VStack(spacing: 24) {
@@ -20,93 +20,60 @@ struct ContentView: View {
             LidGaugeView(percentage: sensor.percentage)
                 .frame(width: 220, height: 220)
 
-            // Percentage text
-            Text("\(Int(sensor.percentage.rounded()))%")
-                .font(.system(size: 56, weight: .bold, design: .rounded))
-                .foregroundStyle(colorForPercentage(sensor.percentage))
-                .contentTransition(.numericText())
-                .animation(.easeInOut(duration: 0.15), value: Int(sensor.percentage.rounded()))
-
-            // Status label
-            Text(lidStatusLabel)
-                .font(.title3)
-                .foregroundStyle(.secondary)
-
-            Spacer()
-
-            // Raw sensor value
-            HStack {
-                Image(systemName: "sun.max.fill")
-                    .foregroundStyle(.yellow)
-                Text("Light sensor: \(sensor.rawLightValue)")
-                    .font(.caption)
+            // Angle in degrees
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text("\(Int(sensor.angle.rounded()))")
+                    .font(.system(size: 56, weight: .bold, design: .rounded))
+                    .foregroundStyle(colorForPercentage(sensor.percentage))
+                    .contentTransition(.numericText())
+                    .animation(.easeInOut(duration: 0.15), value: Int(sensor.angle.rounded()))
+                Text("\u{00B0}")
+                    .font(.system(size: 32, weight: .light, design: .rounded))
                     .foregroundStyle(.secondary)
             }
 
-            // Status message
-            Text(sensor.statusMessage)
-                .font(.caption2)
+            // Percentage
+            Text("\(Int(sensor.percentage.rounded()))% open")
+                .font(.title2)
+                .foregroundStyle(.secondary)
+
+            // Status label
+            Text(sensor.status)
+                .font(.title3)
                 .foregroundStyle(.tertiary)
 
-            Divider()
-
-            // Calibration controls
-            VStack(spacing: 12) {
-                Text("Calibration")
+            // Velocity
+            if sensor.velocity > 0.5 {
+                Text(String(format: "%.1f\u{00B0}/s", sensor.velocity))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .transition(.opacity)
+            }
 
-                HStack(spacing: 12) {
-                    Button("Set Fully Open") {
-                        sensor.calibrateOpen()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
+            Spacer()
 
-                    Button("Set Nearly Closed") {
-                        sensor.calibrateClosed()
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-
-                    Button("Reset") {
-                        sensor.resetCalibration()
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .tint(.red)
-                }
-
-                if sensor.isCalibrated {
-                    Text("Calibrated")
-                        .font(.caption2)
-                        .foregroundStyle(.green)
-                }
+            // Status message
+            HStack {
+                Circle()
+                    .fill(sensor.isAvailable ? .green : .red)
+                    .frame(width: 8, height: 8)
+                Text(sensor.statusMessage)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
             }
         }
         .padding(30)
         .frame(width: 400, height: 520)
         .onAppear {
-            sensor.startMonitoring()
+            sensor.start()
         }
         .onDisappear {
-            sensor.stopMonitoring()
+            sensor.stop()
         }
         .overlay {
-            if !sensor.sensorAvailable {
+            if !sensor.isAvailable && sensor.statusMessage.contains("not found") {
                 SensorUnavailableView()
             }
-        }
-    }
-
-    private var lidStatusLabel: String {
-        switch sensor.percentage {
-        case 0..<5: return "Closed"
-        case 5..<25: return "Barely Open"
-        case 25..<50: return "Half Open"
-        case 50..<75: return "Mostly Open"
-        case 75..<95: return "Open"
-        default: return "Fully Open"
         }
     }
 
@@ -184,17 +151,26 @@ struct SensorUnavailableView: View {
                 Text("Sensor Not Available")
                     .font(.title2.bold())
 
-                Text("Lidmeup requires a MacBook with an ambient light sensor.\n\nMake sure you're running this on a MacBook\nand that the sensor is accessible.")
-                    .font(.body)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 20)
+                VStack(spacing: 8) {
+                    Text("Lidmeup requires a MacBook with a lid angle sensor.")
+                        .font(.body)
 
-                Text("Tip: On macOS, go to System Settings > Privacy & Security > Sensors\nand ensure this app has permission.")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 20)
+                    Text("Supported models:")
+                        .font(.subheadline.bold())
+                        .padding(.top, 4)
+
+                    Text("MacBook Pro 14\"/16\" (2021-2024, M1 Pro/Max+)\nMacBook Air (M2+, 2022+)")
+                        .font(.caption)
+                        .multilineTextAlignment(.center)
+
+                    Text("Note: M1/M2 MacBook Air/Pro with Touch Bar\nare NOT supported.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.top, 4)
+                }
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 20)
             }
         }
     }
