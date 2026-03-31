@@ -9,10 +9,11 @@ import IOKit.hid
 /// and reads the raw angle from bytes 1-2 of the feature report.
 @Observable
 final class LidSensor {
-    private(set) var angle: Double = 120.0
+    private(set) var angle: Double = 0.0
     private(set) var velocity: Double = 0.0
     private(set) var isAvailable: Bool = false
     private(set) var statusMessage: String = "Starting..."
+    private(set) var debugLog: String = ""
 
     /// Angle as a percentage (0% = closed at 0 deg, 100% = fully open at ~130 deg)
     var percentage: Double {
@@ -35,15 +36,21 @@ final class LidSensor {
 
     private var timer: Timer?
     private var hidDevice: IOHIDDevice?
-    private var reportID: UInt32 = 0
-    private var reportLength: Int = 0
-    private var lastAngle: Double = 120.0
+    private var reportID: CFIndex = 0
+    private var reportLength: CFIndex = 0
+    private var lastAngle: Double = 0.0
     private var lastTimestamp: TimeInterval = 0
+    private var hasFirstReading: Bool = false
 
     init() {}
 
     deinit {
         stop()
+    }
+
+    private func log(_ msg: String) {
+        debugLog = msg
+        print("[LidSensor] \(msg)")
     }
 
     // MARK: - Lifecycle
@@ -57,9 +64,20 @@ final class LidSensor {
             return
         }
 
+        // Open the device for reading
+        let openResult = IOHIDDeviceOpen(hidDevice!, IOOptionBits(kIOHIDOptionsTypeNone))
+        guard openResult == kIOReturnSuccess else {
+            log("Failed to open HID device: \(String(format: "0x%x", openResult))")
+            statusMessage = "Could not open sensor (error: \(String(format: "0x%x", openResult)))"
+            isAvailable = false
+            hidDevice = nil
+            return
+        }
+
         isAvailable = true
         statusMessage = "Sensor connected"
         lastTimestamp = ProcessInfo.processInfo.systemUptime
+        log("Sensor opened, starting polling (reportID=\(reportID), reportLength=\(reportLength))")
 
         timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
             self?.poll()
@@ -70,33 +88,35 @@ final class LidSensor {
     func stop() {
         timer?.invalidate()
         timer = nil
+        if let device = hidDevice {
+            IOHIDDeviceClose(device, IOOptionBits(kIOHIDOptionsTypeNone))
+        }
         hidDevice = nil
     }
 
     // MARK: - HID Sensor Discovery
 
     private func findSensor() {
-        // Try standard sensor first (usage page 0x0020, usage 0x008A)
-        if let device = findStandardSensor() {
-            hidDevice = device
-            return
-        }
-        // Fallback: vendor-specific device 0x8104
-        if let device = findVendorSpecificSensor() {
-            hidDevice = device
-            return
-        }
-    }
-
-    private func findStandardSensor() -> IOHIDDevice? {
         let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
         IOHIDManagerSetDeviceMatching(manager, nil)
-        IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
 
-        guard let deviceSet = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice> else {
-            return nil
+        // Schedule on run loop so device enumeration works
+        IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
+
+        let openResult = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+        guard openResult == kIOReturnSuccess else {
+            log("Failed to open HID manager: \(String(format: "0x%x", openResult))")
+            return
         }
 
+        guard let deviceSet = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice> else {
+            log("No HID devices found at all")
+            return
+        }
+
+        log("Found \(deviceSet.count) HID devices, scanning for lid sensor...")
+
+        // Try standard sensor (usage page 0x0020, usage 0x008A)
         for device in deviceSet {
             guard let elements = IOHIDDeviceCopyMatchingElements(device, nil, IOOptionBits(kIOHIDOptionsTypeNone)) as? [IOHIDElement] else {
                 continue
@@ -107,43 +127,38 @@ final class LidSensor {
                 let usage = IOHIDElementGetUsage(element)
 
                 if usagePage == 0x0020 && usage == 0x008A {
-                    let rid = IOHIDElementGetReportID(element)
-                    self.reportID = UInt32(rid)
-                    // Determine report length from device
-                    self.reportLength = 64 // Default; will be overridden if needed
-                    statusMessage = "Found standard lid angle sensor"
-                    return device
+                    self.reportID = CFIndex(IOHIDElementGetReportID(element))
+                    // Get report size from the element, add 1 byte for report ID prefix
+                    let reportSize = IOHIDElementGetReportSize(element)
+                    self.reportLength = CFIndex((reportSize / 8) + 1)
+                    if self.reportLength < 3 {
+                        self.reportLength = 64 // Fallback
+                    }
+
+                    let deviceName = IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String ?? "Unknown"
+                    log("Found standard sensor on '\(deviceName)' (reportID=\(reportID), reportLength=\(reportLength))")
+                    statusMessage = "Found lid angle sensor"
+                    hidDevice = device
+                    return
                 }
             }
         }
 
-        return nil
-    }
-
-    private func findVendorSpecificSensor() -> IOHIDDevice? {
-        let matching: [String: Any] = [
-            kIOHIDDeviceUsagePageKey: 0xFF00,
-            kIOHIDDeviceUsageKey: 0x0001,
-        ]
-        let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
-        IOHIDManagerSetDeviceMatching(manager, matching as CFDictionary)
-        IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
-
-        guard let deviceSet = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice> else {
-            return nil
-        }
-
+        // Fallback: vendor-specific device (product ID 0x8104)
         for device in deviceSet {
             let productID = IOHIDDeviceGetProperty(device, kIOHIDProductIDKey as CFString) as? Int
             if productID == 0x8104 {
                 self.reportID = 0
                 self.reportLength = 64
-                statusMessage = "Found vendor-specific lid angle sensor"
-                return device
+                let deviceName = IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String ?? "Unknown"
+                log("Found vendor-specific sensor on '\(deviceName)' (productID=0x8104)")
+                statusMessage = "Found vendor-specific lid sensor"
+                hidDevice = device
+                return
             }
         }
 
-        return nil
+        log("No lid angle sensor found among \(deviceSet.count) HID devices")
     }
 
     // MARK: - Polling
@@ -151,21 +166,39 @@ final class LidSensor {
     private func poll() {
         guard let device = hidDevice else { return }
 
-        var report = [UInt8](repeating: 0, count: reportLength)
-        var length = CFIndex(reportLength)
+        var report = [UInt8](repeating: 0, count: Int(reportLength))
+        var length = reportLength
 
         let result = IOHIDDeviceGetReport(
             device,
             kIOHIDReportTypeFeature,
-            CFIndex(reportID),
+            reportID,
             &report,
             &length
         )
 
-        guard result == kIOReturnSuccess, length >= 3 else { return }
+        guard result == kIOReturnSuccess else {
+            if !hasFirstReading {
+                log("GetReport failed: \(String(format: "0x%x", result)), length=\(length)")
+            }
+            return
+        }
+
+        guard length >= 3 else {
+            if !hasFirstReading {
+                log("Report too short: \(length) bytes")
+            }
+            return
+        }
 
         // Raw angle from bytes 1-2 (little-endian 16-bit)
         let rawAngle = Double(UInt16(report[1]) | (UInt16(report[2]) << 8))
+
+        if !hasFirstReading {
+            log("First reading: raw=\(rawAngle)° (bytes: \(report.prefix(Int(length)).map { String(format: "%02x", $0) }.joined(separator: " ")))")
+            lastAngle = rawAngle
+            hasFirstReading = true
+        }
 
         let now = ProcessInfo.processInfo.systemUptime
         let dt = now - lastTimestamp
@@ -187,5 +220,6 @@ final class LidSensor {
 
         lastAngle = smoothedAngle
         angle = smoothedAngle
+        statusMessage = "Monitoring lid position..."
     }
 }
