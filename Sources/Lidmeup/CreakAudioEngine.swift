@@ -3,20 +3,18 @@ import Foundation
 
 /// Plays sound in response to lid movement.
 /// Supports two modes:
-/// - **Continuous**: loops an audio buffer, volume modulated by velocity (for custom files, donkey)
-/// - **One-shot**: plays a short click on each degree change (for metallic click, iPod click)
+/// - **Continuous**: loops an audio buffer, volume modulated by velocity
+/// - **One-shot**: plays a short click on each degree change
 final class CreakAudioEngine {
-    private let engine = AVAudioEngine()
+    private var engine = AVAudioEngine()
     private var playerNode = AVAudioPlayerNode()
-    private var clickPlayerNode = AVAudioPlayerNode()  // Separate node for one-shots
+    private var clickPlayerNode = AVAudioPlayerNode()
     private var varispeed = AVAudioUnitVarispeed()
     private var audioBuffer: AVAudioPCMBuffer?
     private var clickBuffer: AVAudioPCMBuffer?
     private(set) var isRunning = false
     private(set) var isFileLoaded = false
     private(set) var loadedFileName: String = ""
-
-    // Current preset
     private(set) var currentPreset: SoundPreset = .customFile
     private var isOneShotMode = false
 
@@ -34,11 +32,30 @@ final class CreakAudioEngine {
     private var lastClickAngle: Double = 0
     private var currentVolume: Float = 0
     private var currentRate: Float = 1.0
-
     private var updateTimer: Timer?
+
     private let savedFileKey = "lidmeup_audio_file"
+    private let monoFormat = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1)!
 
     init() {
+        setupEngine()
+
+        // Restore last used custom file
+        if let bookmark = UserDefaults.standard.data(forKey: savedFileKey) {
+            var isStale = false
+            if let url = try? URL(resolvingBookmarkData: bookmark, options: .withSecurityScope, bookmarkDataIsStale: &isStale),
+               url.startAccessingSecurityScopedResource() {
+                loadFile(url: url, saveBookmark: false)
+            }
+        }
+    }
+
+    private func setupEngine() {
+        engine = AVAudioEngine()
+        playerNode = AVAudioPlayerNode()
+        clickPlayerNode = AVAudioPlayerNode()
+        varispeed = AVAudioUnitVarispeed()
+
         engine.attach(playerNode)
         engine.attach(clickPlayerNode)
         engine.attach(varispeed)
@@ -47,21 +64,12 @@ final class CreakAudioEngine {
         engine.connect(playerNode, to: varispeed, format: nil)
         engine.connect(varispeed, to: engine.mainMixerNode, format: nil)
 
-        // One-shot path: clickPlayerNode → mixer directly
-        engine.connect(clickPlayerNode, to: engine.mainMixerNode, format: nil)
+        // One-shot path: clickPlayerNode → mixer
+        engine.connect(clickPlayerNode, to: engine.mainMixerNode, format: monoFormat)
 
         playerNode.volume = 0
         clickPlayerNode.volume = 1.0
         varispeed.rate = 1.0
-
-        // Restore last used file
-        if let bookmark = UserDefaults.standard.data(forKey: savedFileKey) {
-            var isStale = false
-            if let url = try? URL(resolvingBookmarkData: bookmark, options: .withSecurityScope, bookmarkDataIsStale: &isStale),
-               url.startAccessingSecurityScopedResource() {
-                loadFile(url: url, saveBookmark: false)
-            }
-        }
     }
 
     // MARK: - Preset Selection
@@ -74,13 +82,9 @@ final class CreakAudioEngine {
         isOneShotMode = preset.isOneShot
 
         if preset == .customFile {
-            // Restore custom file if we have one
-            if audioBuffer == nil {
-                isFileLoaded = false
-                loadedFileName = ""
-            }
+            // Keep whatever custom file was loaded
+            clickBuffer = nil
         } else {
-            // Generate procedural sound
             if let buffer = SoundGenerator.generateBuffer(for: preset) {
                 if preset.isOneShot {
                     clickBuffer = buffer
@@ -91,13 +95,16 @@ final class CreakAudioEngine {
                 }
                 loadedFileName = preset.rawValue
                 isFileLoaded = true
+                print("[CreakAudioEngine] Generated \(preset.rawValue): \(buffer.frameLength) frames")
             }
         }
 
-        if wasRunning { start() }
+        if wasRunning && isFileLoaded { start() }
     }
 
     // MARK: - File Loading
+
+    private var customFileBuffer: AVAudioPCMBuffer?
 
     func loadFile(url: URL, saveBookmark: Bool = true) {
         do {
@@ -112,6 +119,8 @@ final class CreakAudioEngine {
 
             guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(file.length)) else { return }
             try file.read(into: buffer)
+
+            customFileBuffer = buffer
             audioBuffer = buffer
             clickBuffer = nil
 
@@ -125,6 +134,12 @@ final class CreakAudioEngine {
                     UserDefaults.standard.set(bookmark, forKey: savedFileKey)
                 }
             }
+
+            // Reconnect playerNode with the file's format
+            engine.disconnectNodeOutput(playerNode)
+            engine.disconnectNodeOutput(varispeed)
+            engine.connect(playerNode, to: varispeed, format: format)
+            engine.connect(varispeed, to: engine.mainMixerNode, format: nil)
 
             print("[CreakAudioEngine] Loaded: \(loadedFileName) (\(file.length) frames, \(format.sampleRate)Hz)")
         } catch {
@@ -142,17 +157,25 @@ final class CreakAudioEngine {
         }
         guard !isRunning else { return }
 
+        // For procedural presets, reconnect playerNode with monoFormat
+        if currentPreset != .customFile && !isOneShotMode {
+            engine.disconnectNodeOutput(playerNode)
+            engine.disconnectNodeOutput(varispeed)
+            engine.connect(playerNode, to: varispeed, format: monoFormat)
+            engine.connect(varispeed, to: engine.mainMixerNode, format: nil)
+        }
+
         do {
             try engine.start()
 
             if isOneShotMode {
-                // Click mode — player stays ready, sounds are triggered per-degree
                 clickPlayerNode.volume = masterVolume
+                // Pre-play so it's ready to schedule buffers
+                clickPlayerNode.play()
             } else if let buffer = audioBuffer {
-                // Continuous mode — loop with volume modulation
+                playerNode.volume = 0
                 playerNode.scheduleBuffer(buffer, at: nil, options: .loops)
                 playerNode.play()
-                playerNode.volume = 0
             }
 
             currentVolume = 0
@@ -161,7 +184,6 @@ final class CreakAudioEngine {
             lastClickAngle = latestAngle
             isRunning = true
 
-            // Update loop for continuous mode volume + one-shot triggering
             updateTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
                 self?.updateAudio()
             }
@@ -169,7 +191,7 @@ final class CreakAudioEngine {
 
             print("[CreakAudioEngine] Started (\(isOneShotMode ? "one-shot" : "continuous") mode)")
         } catch {
-            print("[CreakAudioEngine] Failed to start: \(error)")
+            print("[CreakAudioEngine] Failed to start engine: \(error)")
         }
     }
 
@@ -206,18 +228,14 @@ final class CreakAudioEngine {
     private func updateOneShot() {
         guard let buffer = clickBuffer else { return }
 
-        // Trigger a click each time the angle changes by >= 1 degree
         let angleDelta = abs(latestAngle - lastClickAngle)
         if angleDelta >= 1.0 && latestVelocity > velocityThreshold {
-            clickPlayerNode.volume = masterVolume
             clickPlayerNode.scheduleBuffer(buffer, at: nil, options: [])
-            clickPlayerNode.play()
             lastClickAngle = latestAngle
         }
     }
 
     private func updateContinuous() {
-        // Target volume from velocity
         let targetVolume: Float
         if latestVelocity <= velocityThreshold {
             targetVolume = 0
@@ -228,7 +246,6 @@ final class CreakAudioEngine {
             targetVolume = t * masterVolume
         }
 
-        // Smooth volume ramp
         let dt: Float = 1.0 / 60.0
         let tau = Float(fadeSpeed / 1000.0)
         let alpha = min(1.0, dt / max(tau, 0.001))
@@ -240,7 +257,6 @@ final class CreakAudioEngine {
 
         playerNode.volume = currentVolume
 
-        // Smooth rate changes
         let targetRate: Float
         if latestVelocity <= velocityThreshold {
             targetRate = minRate

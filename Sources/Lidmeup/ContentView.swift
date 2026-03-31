@@ -63,14 +63,7 @@ struct ContentView: View {
                     }
                     .labelsHidden()
                     .onChange(of: selectedPreset) {
-                        if selectedPreset == .customFile {
-                            // Restore custom file if available
-                            if !creakEngine.isFileLoaded || creakEngine.loadedFileName == creakEngine.currentPreset.rawValue {
-                                creakEngine.selectPreset(.customFile)
-                            }
-                        } else {
-                            creakEngine.selectPreset(selectedPreset)
-                        }
+                        creakEngine.selectPreset(selectedPreset)
                     }
                 }
 
