@@ -2,17 +2,24 @@ import SwiftUI
 
 struct ContentView: View {
     @State private var sensor = LidSensor()
+    @State private var creakEngine = CreakAudioEngine()
+    @State private var soundEnabled = false
 
     var body: some View {
         VStack(spacing: 24) {
             // Title
-            Text("Lidmeup")
-                .font(.system(size: 28, weight: .bold, design: .rounded))
-                .foregroundStyle(.primary)
-
-            Text("MacBook Lid Detector")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                VStack(spacing: 4) {
+                    Text("Lidmeup")
+                        .font(.system(size: 28, weight: .bold, design: .rounded))
+                        .foregroundStyle(.primary)
+                    Text("MacBook Lid Detector")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
 
             Spacer()
 
@@ -52,6 +59,32 @@ struct ContentView: View {
 
             Spacer()
 
+            Divider()
+
+            // Sound toggle
+            HStack(spacing: 16) {
+                Button {
+                    soundEnabled.toggle()
+                    if soundEnabled {
+                        creakEngine.start()
+                    } else {
+                        creakEngine.stop()
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: soundEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill")
+                            .font(.title3)
+                        Text(soundEnabled ? "Creak On" : "Creak Off")
+                            .font(.headline)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(soundEnabled ? .orange : .gray)
+                .keyboardShortcut(.space, modifiers: [])
+            }
+
             // Status message
             HStack {
                 Circle()
@@ -63,12 +96,18 @@ struct ContentView: View {
             }
         }
         .padding(30)
-        .frame(width: 400, height: 520)
+        .frame(width: 400, height: 580)
         .onAppear {
             sensor.start()
         }
         .onDisappear {
             sensor.stop()
+            creakEngine.stop()
+        }
+        .onChange(of: sensor.angle) {
+            if soundEnabled {
+                creakEngine.feed(angle: sensor.angle, velocity: sensor.velocity)
+            }
         }
         .overlay {
             if !sensor.isAvailable && sensor.statusMessage.contains("not found") {

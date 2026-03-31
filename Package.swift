@@ -10,6 +10,8 @@ let package = Package(
             path: "Sources/Lidmeup",
             linkerSettings: [
                 .linkedFramework("IOKit"),
+                .linkedFramework("AVFoundation"),
+                .linkedFramework("CoreAudio"),
             ]
         ),
     ]
