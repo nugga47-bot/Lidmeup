@@ -30,8 +30,6 @@ final class LidSensor {
         }
     }
 
-    // No smoothing — use raw values for instant response
-
     private var timer: Timer?
     private var hidDevice: IOHIDDevice?
     private var reportID: CFIndex = 0
@@ -39,6 +37,8 @@ final class LidSensor {
     private var lastAngle: Double = 0.0
     private var lastTimestamp: TimeInterval = 0
     private var hasFirstReading: Bool = false
+    private var lastMovementTime: TimeInterval = 0
+    private var movingVelocity: Double = 0
 
     init() {}
 
@@ -252,14 +252,25 @@ final class LidSensor {
         let dt = now - lastTimestamp
         lastTimestamp = now
 
-        // Velocity from angle delta — with noise floor to avoid phantom movement
+        // Velocity with noise floor and short sustain to avoid jitter.
+        // The sensor polls at 30Hz (~33ms/frame). Slow lid movement may only
+        // register a change every few frames, so we sustain the last known
+        // velocity for a short window (150ms) to keep audio smooth.
         let angleDelta = abs(rawAngle - lastAngle)
-        if dt > 0 && angleDelta >= 0.5 {
-            // Real movement (at least 0.5 degree change between frames)
-            velocity = angleDelta / dt
+        let sustainWindow = 0.15 // seconds — bridges gaps between sensor ticks
+
+        if dt > 0 && angleDelta >= 0.1 {
+            // Real movement detected
+            movingVelocity = angleDelta / dt
+            lastMovementTime = now
+            velocity = movingVelocity
+        } else if (now - lastMovementTime) < sustainWindow {
+            // Within sustain window — hold last velocity
+            velocity = movingVelocity
         } else {
-            // No meaningful movement — zero immediately
+            // No movement for longer than sustain — zero out
             velocity = 0
+            movingVelocity = 0
         }
 
         lastAngle = rawAngle

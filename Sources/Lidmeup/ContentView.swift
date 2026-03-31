@@ -10,7 +10,7 @@ struct ContentView: View {
 
     // Bound parameters
     @State private var volume: Double = 0.8
-    @State private var fadeSpeed: Double = 5.0
+    @State private var fadeSpeed: Double = 20.0
     @State private var minRate: Double = 0.80
     @State private var maxRate: Double = 1.20
     @State private var sensitivity: Double = 10.0
