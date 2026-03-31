@@ -175,7 +175,3 @@ struct SensorUnavailableView: View {
         }
     }
 }
-
-#Preview {
-    ContentView()
-}
