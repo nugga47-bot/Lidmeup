@@ -1,101 +1,109 @@
 import AVFoundation
 import Foundation
 
-/// Synthesizes a door-creak sound in real-time, driven by lid velocity.
-/// Uses multiple detuned oscillators with frequency modulation for a creaky character.
+/// Plays a user-provided audio file, looped and modulated by lid velocity/angle.
+/// Volume fades in when the lid moves and fades out when it stops.
 final class CreakAudioEngine {
     private let engine = AVAudioEngine()
-    private var sourceNode: AVAudioSourceNode?
+    private var playerNode = AVAudioPlayerNode()
+    private var varispeed = AVAudioUnitVarispeed()
+    private var audioFile: AVAudioFile?
+    private var audioBuffer: AVAudioPCMBuffer?
     private(set) var isRunning = false
+    private(set) var isFileLoaded = false
+    private(set) var loadedFileName: String = ""
 
-    // Parameters (tweakable)
-    var baseFrequency: Double = 180.0     // Base creak pitch (Hz)
-    var frequencyRange: Double = 120.0    // How much pitch varies with angle
-    var vibratoRate: Double = 12.0        // Wobble speed for creaky character (Hz)
-    var vibratoDepth: Double = 0.35       // How much wobble
-    var velocityFullGain: Double = 8.0    // Velocity for maximum volume (deg/s)
-    var velocityQuietGain: Double = 0.5   // Velocity below which sound fades out
-    var maxVolume: Double = 0.7           // Peak output volume
+    // User-adjustable parameters
+    var masterVolume: Float = 0.8       // 0.0 - 1.0
+    var fadeSpeed: Double = 50.0        // Fade time in ms (lower = snappier)
+    var minRate: Float = 0.80           // Playback rate when slow
+    var maxRate: Float = 1.20           // Playback rate when fast
+    var velocityThreshold: Double = 0.5 // Min velocity to trigger sound (deg/s)
+    var velocityFullResponse: Double = 10.0 // Velocity for max volume (deg/s)
 
-    // Ramping (milliseconds)
-    var gainRampMs: Double = 40.0
-    var frequencyRampMs: Double = 60.0
+    // Internal state
+    nonisolated(unsafe) private var currentGain: Float = 0
+    nonisolated(unsafe) private var targetGain: Float = 0
+    private var fadeTimer: Timer?
 
-    // State (accessed from audio thread)
-    nonisolated(unsafe) private var phase1: Double = 0
-    nonisolated(unsafe) private var phase2: Double = 0
-    nonisolated(unsafe) private var phase3: Double = 0
-    nonisolated(unsafe) private var vibratoPhase: Double = 0
-    nonisolated(unsafe) private var noisePhase: Double = 0
-    nonisolated(unsafe) private var currentGain: Double = 0
-    nonisolated(unsafe) private var currentFreq: Double = 180.0
+    private let savedFileKey = "lidmeup_audio_file"
 
-    // Targets (set from main thread, read from audio thread)
-    nonisolated(unsafe) private var targetGain: Double = 0
-    nonisolated(unsafe) private var targetFreq: Double = 180.0
+    init() {
+        engine.attach(playerNode)
+        engine.attach(varispeed)
+        engine.connect(playerNode, to: varispeed, format: nil)
+        engine.connect(varispeed, to: engine.mainMixerNode, format: nil)
+        playerNode.volume = 0
 
-    func start() {
-        guard !isRunning else { return }
+        // Restore last used file
+        if let bookmark = UserDefaults.standard.data(forKey: savedFileKey) {
+            var isStale = false
+            if let url = try? URL(resolvingBookmarkData: bookmark, options: .withSecurityScope, bookmarkDataIsStale: &isStale),
+               url.startAccessingSecurityScopedResource() {
+                loadFile(url: url, saveBookmark: false)
+            }
+        }
+    }
 
-        let sampleRate = 44100.0
-        let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
+    // MARK: - File Loading
 
-        sourceNode = AVAudioSourceNode(format: format) { [self] _, _, frameCount, audioBufferList -> OSStatus in
-            let ablPointer = UnsafeMutableAudioBufferListPointer(audioBufferList)
-            let buffer = ablPointer[0]
-            let frames = Int(frameCount)
-            guard let data = buffer.mData?.assumingMemoryBound(to: Float.self) else { return noErr }
+    func loadFile(url: URL, saveBookmark: Bool = true) {
+        do {
+            let file = try AVAudioFile(forReading: url)
+            audioFile = file
 
-            let dt = 1.0 / sampleRate
-            let gainAlpha = min(1.0, dt / (self.gainRampMs / 1000.0))
-            let freqAlpha = min(1.0, dt / (self.frequencyRampMs / 1000.0))
+            guard let format = AVAudioFormat(
+                commonFormat: file.processingFormat.commonFormat,
+                sampleRate: file.processingFormat.sampleRate,
+                channels: file.processingFormat.channelCount,
+                interleaved: file.processingFormat.isInterleaved
+            ) else { return }
 
-            for i in 0..<frames {
-                // Ramp gain and frequency toward targets
-                self.currentGain += (self.targetGain - self.currentGain) * gainAlpha
-                self.currentFreq += (self.targetFreq - self.currentFreq) * freqAlpha
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(file.length)) else { return }
+            try file.read(into: buffer)
+            audioBuffer = buffer
 
-                // Vibrato (creates the "creaky" wobble)
-                self.vibratoPhase += self.vibratoRate * dt
-                let vibrato = sin(self.vibratoPhase * 2.0 * .pi) * self.vibratoDepth
+            loadedFileName = url.lastPathComponent
+            isFileLoaded = true
 
-                let freq = self.currentFreq * (1.0 + vibrato)
-
-                // Oscillator 1: Main tone (slightly harsh sawtooth-like)
-                self.phase1 += freq * dt
-                self.phase1 -= Double(Int(self.phase1))
-                let saw1 = 2.0 * self.phase1 - 1.0
-
-                // Oscillator 2: Detuned slightly up (adds thickness)
-                self.phase2 += (freq * 1.007) * dt
-                self.phase2 -= Double(Int(self.phase2))
-                let saw2 = 2.0 * self.phase2 - 1.0
-
-                // Oscillator 3: Sub-harmonic (adds body)
-                self.phase3 += (freq * 0.501) * dt
-                self.phase3 -= Double(Int(self.phase3))
-                let sub = sin(self.phase3 * 2.0 * .pi) * 0.3
-
-                // Mix oscillators and apply soft clipping for warmth
-                var mix = (saw1 * 0.5 + saw2 * 0.3 + sub) * self.currentGain
-
-                // Soft clip (tanh-like)
-                mix = mix / (1.0 + abs(mix))
-
-                data[i] = Float(mix)
+            // Save bookmark for persistence
+            if saveBookmark {
+                if let bookmark = try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil) {
+                    UserDefaults.standard.set(bookmark, forKey: savedFileKey)
+                }
             }
 
-            return noErr
+            print("[CreakAudioEngine] Loaded: \(loadedFileName) (\(file.length) frames, \(format.sampleRate)Hz)")
+        } catch {
+            print("[CreakAudioEngine] Failed to load file: \(error)")
+            isFileLoaded = false
         }
+    }
 
-        guard let sourceNode else { return }
+    // MARK: - Playback
 
-        engine.attach(sourceNode)
-        engine.connect(sourceNode, to: engine.mainMixerNode, format: format)
+    func start() {
+        guard isFileLoaded, let buffer = audioBuffer else {
+            print("[CreakAudioEngine] No audio file loaded")
+            return
+        }
+        guard !isRunning else { return }
 
         do {
             try engine.start()
+            playerNode.scheduleBuffer(buffer, at: nil, options: .loops)
+            playerNode.play()
+            playerNode.volume = 0
+            currentGain = 0
             isRunning = true
+
+            // Start fade timer for smooth volume transitions
+            fadeTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+                self?.updateFade()
+            }
+            RunLoop.current.add(fadeTimer!, forMode: .common)
+
+            print("[CreakAudioEngine] Started playback")
         } catch {
             print("[CreakAudioEngine] Failed to start: \(error)")
         }
@@ -103,42 +111,46 @@ final class CreakAudioEngine {
 
     func stop() {
         guard isRunning else { return }
+        fadeTimer?.invalidate()
+        fadeTimer = nil
+        playerNode.stop()
         engine.stop()
-        sourceNode.map { engine.detach($0) }
-        sourceNode = nil
         isRunning = false
         currentGain = 0
         targetGain = 0
+        playerNode.volume = 0
     }
 
-    /// Called every frame with the current lid angle and velocity.
+    // MARK: - Feed from sensor
+
     func feed(angle: Double, velocity: Double) {
-        // Map velocity to gain using smoothstep
-        let t: Double
-        if velocity <= velocityQuietGain {
-            t = 0
-        } else if velocity >= velocityFullGain {
-            t = 1
-        } else {
-            let normalized = (velocity - velocityQuietGain) / (velocityFullGain - velocityQuietGain)
-            t = normalized * normalized * (3 - 2 * normalized) // smoothstep
-        }
-        targetGain = t * maxVolume
+        guard isRunning else { return }
 
-        // Map angle to frequency (lower angle = lower pitch, like a heavy door)
-        let angleFraction = min(1.0, max(0.0, angle / 130.0))
-        targetFreq = baseFrequency + frequencyRange * angleFraction
+        // Map velocity to target gain using smoothstep
+        let gain: Float
+        if velocity <= velocityThreshold {
+            gain = 0
+        } else if velocity >= velocityFullResponse {
+            gain = masterVolume
+        } else {
+            let t = Float((velocity - velocityThreshold) / (velocityFullResponse - velocityThreshold))
+            let smooth = t * t * (3 - 2 * t)
+            gain = smooth * masterVolume
+        }
+        targetGain = gain
+
+        // Map velocity to playback rate
+        let rateFraction = Float(min(1.0, max(0.0, velocity / velocityFullResponse)))
+        varispeed.rate = minRate + (maxRate - minRate) * rateFraction
     }
 
-    func resetToDefaults() {
-        baseFrequency = 180.0
-        frequencyRange = 120.0
-        vibratoRate = 12.0
-        vibratoDepth = 0.35
-        velocityFullGain = 8.0
-        velocityQuietGain = 0.5
-        maxVolume = 0.7
-        gainRampMs = 40.0
-        frequencyRampMs = 60.0
+    // MARK: - Smooth fade
+
+    private func updateFade() {
+        let alpha = Float(min(1.0, (1.0 / 60.0) / (fadeSpeed / 1000.0)))
+        currentGain += (targetGain - currentGain) * alpha
+        // Snap to zero if very quiet
+        if currentGain < 0.005 { currentGain = 0 }
+        playerNode.volume = currentGain
     }
 }

@@ -8,7 +8,7 @@ struct LidmeupApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .frame(minWidth: 400, minHeight: 580)
+                .frame(minWidth: 400, minHeight: 560)
         }
         .windowStyle(.titleBar)
         .windowResizability(.contentSize)

@@ -1,91 +1,126 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @State private var sensor = LidSensor()
     @State private var creakEngine = CreakAudioEngine()
     @State private var soundEnabled = false
+    @State private var showFilePicker = false
+    @State private var showSoundControls = false
+
+    // Bound parameters
+    @State private var volume: Double = 0.8
+    @State private var fadeSpeed: Double = 50.0
+    @State private var minRate: Double = 0.80
+    @State private var maxRate: Double = 1.20
+    @State private var sensitivity: Double = 10.0
 
     var body: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: 20) {
             // Title
-            HStack {
-                Spacer()
-                VStack(spacing: 4) {
-                    Text("Lidmeup")
-                        .font(.system(size: 28, weight: .bold, design: .rounded))
-                        .foregroundStyle(.primary)
-                    Text("MacBook Lid Detector")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
+            VStack(spacing: 4) {
+                Text("Lidmeup")
+                    .font(.system(size: 28, weight: .bold, design: .rounded))
+                    .foregroundStyle(.primary)
+                Text("MacBook Lid Detector")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
             }
-
-            Spacer()
 
             // Main gauge
             LidGaugeView(percentage: sensor.percentage)
-                .frame(width: 220, height: 220)
+                .frame(width: 200, height: 200)
 
             // Angle in degrees
             HStack(alignment: .firstTextBaseline, spacing: 4) {
                 Text("\(Int(sensor.angle.rounded()))")
-                    .font(.system(size: 56, weight: .bold, design: .rounded))
+                    .font(.system(size: 48, weight: .bold, design: .rounded))
                     .foregroundStyle(colorForPercentage(sensor.percentage))
                     .contentTransition(.numericText())
                     .animation(.easeInOut(duration: 0.15), value: Int(sensor.angle.rounded()))
                 Text("\u{00B0}")
-                    .font(.system(size: 32, weight: .light, design: .rounded))
+                    .font(.system(size: 28, weight: .light, design: .rounded))
                     .foregroundStyle(.secondary)
             }
 
-            // Percentage
-            Text("\(Int(sensor.percentage.rounded()))% open")
-                .font(.title2)
+            // Percentage + status
+            Text("\(Int(sensor.percentage.rounded()))% open  \u{2022}  \(sensor.status)")
+                .font(.subheadline)
                 .foregroundStyle(.secondary)
-
-            // Status label
-            Text(sensor.status)
-                .font(.title3)
-                .foregroundStyle(.tertiary)
-
-            // Velocity
-            if sensor.velocity > 0.5 {
-                Text(String(format: "%.1f\u{00B0}/s", sensor.velocity))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .transition(.opacity)
-            }
-
-            Spacer()
 
             Divider()
 
-            // Sound toggle
-            HStack(spacing: 16) {
-                Button {
-                    soundEnabled.toggle()
-                    if soundEnabled {
-                        creakEngine.start()
+            // MARK: - Sound Section
+            VStack(spacing: 12) {
+                // File picker row
+                HStack {
+                    Image(systemName: "waveform")
+                        .foregroundStyle(.orange)
+                    if creakEngine.isFileLoaded {
+                        Text(creakEngine.loadedFileName)
+                            .font(.caption)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     } else {
-                        creakEngine.stop()
+                        Text("No sound file loaded")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
                     }
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: soundEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill")
-                            .font(.title3)
-                        Text(soundEnabled ? "Creak On" : "Creak Off")
-                            .font(.headline)
+                    Spacer()
+                    Button("Choose File...") {
+                        showFilePicker = true
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
+                    .controlSize(.small)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(soundEnabled ? .orange : .gray)
-                .keyboardShortcut(.space, modifiers: [])
+
+                // Play + Controls row
+                HStack(spacing: 10) {
+                    Button {
+                        soundEnabled.toggle()
+                        if soundEnabled {
+                            creakEngine.start()
+                        } else {
+                            creakEngine.stop()
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: soundEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill")
+                            Text(soundEnabled ? "Sound On" : "Sound Off")
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(soundEnabled ? .orange : .gray)
+                    .disabled(!creakEngine.isFileLoaded)
+                    .keyboardShortcut(.space, modifiers: [])
+
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showSoundControls.toggle()
+                        }
+                    } label: {
+                        Image(systemName: "slider.horizontal.3")
+                            .padding(.vertical, 6)
+                            .padding(.horizontal, 10)
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                // Expandable controls
+                if showSoundControls {
+                    SoundControlsView(
+                        volume: $volume,
+                        fadeSpeed: $fadeSpeed,
+                        minRate: $minRate,
+                        maxRate: $maxRate,
+                        sensitivity: $sensitivity
+                    )
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                }
             }
 
-            // Status message
+            // Status bar
             HStack {
                 Circle()
                     .fill(sensor.isAvailable ? .green : .red)
@@ -93,10 +128,16 @@ struct ContentView: View {
                 Text(sensor.statusMessage)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
+                Spacer()
+                if sensor.velocity > 0.5 {
+                    Text(String(format: "%.1f\u{00B0}/s", sensor.velocity))
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
             }
         }
-        .padding(30)
-        .frame(width: 400, height: 580)
+        .padding(24)
+        .frame(width: 400, minHeight: 560)
         .onAppear {
             sensor.start()
         }
@@ -107,6 +148,22 @@ struct ContentView: View {
         .onChange(of: sensor.angle) {
             if soundEnabled {
                 creakEngine.feed(angle: sensor.angle, velocity: sensor.velocity)
+            }
+        }
+        .onChange(of: volume) { creakEngine.masterVolume = Float(volume) }
+        .onChange(of: fadeSpeed) { creakEngine.fadeSpeed = fadeSpeed }
+        .onChange(of: minRate) { creakEngine.minRate = Float(minRate) }
+        .onChange(of: maxRate) { creakEngine.maxRate = Float(maxRate) }
+        .onChange(of: sensitivity) { creakEngine.velocityFullResponse = sensitivity }
+        .fileImporter(
+            isPresented: $showFilePicker,
+            allowedContentTypes: [.audio],
+            allowsMultipleSelection: false
+        ) { result in
+            if case .success(let urls) = result, let url = urls.first {
+                if url.startAccessingSecurityScopedResource() {
+                    creakEngine.loadFile(url: url)
+                }
             }
         }
         .overlay {
@@ -124,6 +181,59 @@ struct ContentView: View {
     }
 }
 
+// MARK: - Sound Controls
+
+struct SoundControlsView: View {
+    @Binding var volume: Double
+    @Binding var fadeSpeed: Double
+    @Binding var minRate: Double
+    @Binding var maxRate: Double
+    @Binding var sensitivity: Double
+
+    var body: some View {
+        VStack(spacing: 10) {
+            ParamSlider(label: "Volume", value: $volume, range: 0...1, displayFormat: "%.0f%%") { $0 * 100 }
+            ParamSlider(label: "Fade Speed", value: $fadeSpeed, range: 10...500, unit: "ms")
+            ParamSlider(label: "Min Pitch", value: $minRate, range: 0.3...1.5, displayFormat: "%.2fx")
+            ParamSlider(label: "Max Pitch", value: $maxRate, range: 0.5...3.0, displayFormat: "%.2fx")
+            ParamSlider(label: "Sensitivity", value: $sensitivity, range: 1...50, unit: "\u{00B0}/s")
+        }
+        .padding(12)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+struct ParamSlider: View {
+    let label: String
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    var unit: String = ""
+    var displayFormat: String? = nil
+    var displayTransform: ((Double) -> Double)? = nil
+
+    var body: some View {
+        HStack {
+            Text(label)
+                .font(.caption)
+                .frame(width: 75, alignment: .leading)
+            Slider(value: $value, in: range)
+                .controlSize(.small)
+            Text(formattedValue)
+                .font(.caption.monospacedDigit())
+                .frame(width: 55, alignment: .trailing)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var formattedValue: String {
+        let displayVal = displayTransform?(value) ?? value
+        if let fmt = displayFormat {
+            return String(format: fmt, displayVal)
+        }
+        return String(format: "%.1f", displayVal) + unit
+    }
+}
+
 // MARK: - Gauge View
 
 struct LidGaugeView: View {
@@ -131,28 +241,25 @@ struct LidGaugeView: View {
 
     var body: some View {
         ZStack {
-            // Background track
             Circle()
                 .trim(from: 0, to: 0.75)
                 .stroke(
                     Color.gray.opacity(0.2),
-                    style: StrokeStyle(lineWidth: 20, lineCap: .round)
+                    style: StrokeStyle(lineWidth: 18, lineCap: .round)
                 )
                 .rotationEffect(.degrees(135))
 
-            // Filled arc
             Circle()
                 .trim(from: 0, to: 0.75 * percentage / 100)
                 .stroke(
                     gaugeGradient,
-                    style: StrokeStyle(lineWidth: 20, lineCap: .round)
+                    style: StrokeStyle(lineWidth: 18, lineCap: .round)
                 )
                 .rotationEffect(.degrees(135))
                 .animation(.easeInOut(duration: 0.2), value: percentage)
 
-            // Laptop icon
-            Image(systemName: laptopIcon)
-                .font(.system(size: 40))
+            Image(systemName: percentage < 5 ? "laptopcomputer.slash" : "laptopcomputer")
+                .font(.system(size: 36))
                 .foregroundStyle(.primary)
         }
     }
@@ -164,14 +271,6 @@ struct LidGaugeView: View {
             startAngle: .degrees(135),
             endAngle: .degrees(135 + 270)
         )
-    }
-
-    private var laptopIcon: String {
-        if percentage < 5 {
-            return "laptopcomputer.slash"
-        } else {
-            return "laptopcomputer"
-        }
     }
 }
 
@@ -193,20 +292,9 @@ struct SensorUnavailableView: View {
                 VStack(spacing: 8) {
                     Text("Lidmeup requires a MacBook with a lid angle sensor.")
                         .font(.body)
-
-                    Text("Supported models:")
-                        .font(.subheadline.bold())
-                        .padding(.top, 4)
-
-                    Text("MacBook Pro 14\"/16\" (2021-2024, M1 Pro/Max+)\nMacBook Air (M2+, 2022+)")
+                    Text("Supported: MacBook Pro 14\"/16\" (2021+), MacBook Air (M2+, 2022+)")
                         .font(.caption)
                         .multilineTextAlignment(.center)
-
-                    Text("Note: M1/M2 MacBook Air/Pro with Touch Bar\nare NOT supported.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.top, 4)
                 }
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 20)
