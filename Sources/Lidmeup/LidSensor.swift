@@ -30,9 +30,7 @@ final class LidSensor {
         }
     }
 
-    // Smoothing factors
-    private let angleSmoothingFactor = 0.05
-    private let velocitySmoothingFactor = 0.30
+    // No smoothing — use raw values for instant response
 
     private var timer: Timer?
     private var hidDevice: IOHIDDevice?
@@ -254,22 +252,13 @@ final class LidSensor {
         let dt = now - lastTimestamp
         lastTimestamp = now
 
-        // Exponential smoothing on angle
-        let smoothedAngle = lastAngle + angleSmoothingFactor * (rawAngle - lastAngle)
-
-        // Velocity calculation
+        // Direct velocity from raw angle delta — no smoothing
         if dt > 0 {
-            let rawVelocity = abs(smoothedAngle - lastAngle) / dt
-            velocity = velocity + velocitySmoothingFactor * (rawVelocity - velocity)
+            velocity = abs(rawAngle - lastAngle) / dt
         }
 
-        // Decay velocity when not moving
-        if abs(rawAngle - lastAngle) < 0.5 {
-            velocity *= 0.5
-        }
-
-        lastAngle = smoothedAngle
-        angle = smoothedAngle
+        lastAngle = rawAngle
+        angle = rawAngle
         statusMessage = "Monitoring lid position..."
     }
 }

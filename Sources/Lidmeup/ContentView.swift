@@ -10,7 +10,7 @@ struct ContentView: View {
 
     // Bound parameters
     @State private var volume: Double = 0.8
-    @State private var fadeSpeed: Double = 50.0
+    @State private var fadeSpeed: Double = 5.0
     @State private var minRate: Double = 0.80
     @State private var maxRate: Double = 1.20
     @State private var sensitivity: Double = 10.0
@@ -37,7 +37,6 @@ struct ContentView: View {
                     .font(.system(size: 48, weight: .bold, design: .rounded))
                     .foregroundStyle(colorForPercentage(sensor.percentage))
                     .contentTransition(.numericText())
-                    .animation(.easeInOut(duration: 0.15), value: Int(sensor.angle.rounded()))
                 Text("\u{00B0}")
                     .font(.system(size: 28, weight: .light, design: .rounded))
                     .foregroundStyle(.secondary)
@@ -137,7 +136,7 @@ struct ContentView: View {
             }
         }
         .padding(24)
-        .frame(width: 400, height: 560)
+        .frame(minWidth: 400, idealWidth: 400, minHeight: 500, idealHeight: 700)
         .onAppear {
             sensor.start()
         }
@@ -256,7 +255,7 @@ struct LidGaugeView: View {
                     style: StrokeStyle(lineWidth: 18, lineCap: .round)
                 )
                 .rotationEffect(.degrees(135))
-                .animation(.easeInOut(duration: 0.2), value: percentage)
+                .animation(.linear(duration: 0.03), value: percentage)
 
             Image(systemName: percentage < 5 ? "laptopcomputer.slash" : "laptopcomputer")
                 .font(.system(size: 36))

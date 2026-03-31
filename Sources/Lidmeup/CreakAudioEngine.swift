@@ -15,7 +15,7 @@ final class CreakAudioEngine {
 
     // User-adjustable parameters
     var masterVolume: Float = 0.8       // 0.0 - 1.0
-    var fadeSpeed: Double = 50.0        // Fade time in ms (lower = snappier)
+    var fadeSpeed: Double = 5.0         // Fade time in ms (lower = snappier, near-instant by default)
     var minRate: Float = 0.80           // Playback rate when slow
     var maxRate: Float = 1.20           // Playback rate when fast
     var velocityThreshold: Double = 0.5 // Min velocity to trigger sound (deg/s)

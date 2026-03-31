@@ -7,11 +7,12 @@ struct LidmeupApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .frame(minWidth: 400, minHeight: 560)
+            ScrollView {
+                ContentView()
+            }
+            .frame(minWidth: 400, minHeight: 400)
         }
         .windowStyle(.titleBar)
-        .windowResizability(.contentSize)
 
         MenuBarExtra {
             MenuBarView(sensor: sensor)
