@@ -128,15 +128,24 @@ final class LidSensor {
 
                 if usagePage == 0x0020 && usage == 0x008A {
                     self.reportID = CFIndex(IOHIDElementGetReportID(element))
-                    // Get report size from the element, add 1 byte for report ID prefix
-                    let reportSize = IOHIDElementGetReportSize(element)
-                    self.reportLength = CFIndex((reportSize / 8) + 1)
+
+                    // Get max feature report size from device property
+                    let maxSize = IOHIDDeviceGetProperty(device, kIOHIDMaxFeatureReportSizeKey as CFString) as? Int ?? 0
+                    let elementReportSize = IOHIDElementGetReportSize(element)
+                    let elementReportCount = IOHIDElementGetReportCount(element)
+
+                    // Use device's max feature report size if available, otherwise calculate from element
+                    if maxSize > 0 {
+                        self.reportLength = CFIndex(maxSize)
+                    } else {
+                        self.reportLength = CFIndex((elementReportSize * elementReportCount / 8) + 1)
+                    }
                     if self.reportLength < 3 {
-                        self.reportLength = 64 // Fallback
+                        self.reportLength = 3
                     }
 
                     let deviceName = IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String ?? "Unknown"
-                    log("Found standard sensor on '\(deviceName)' (reportID=\(reportID), reportLength=\(reportLength))")
+                    log("Found standard sensor on '\(deviceName)' (reportID=\(reportID), maxFeatureSize=\(maxSize), elementSize=\(elementReportSize), elementCount=\(elementReportCount), reportLength=\(reportLength))")
                     statusMessage = "Found lid angle sensor"
                     hidDevice = device
                     return
@@ -163,39 +172,80 @@ final class LidSensor {
 
     // MARK: - Polling
 
+    private var retryCount = 0
+
+    private func tryGetReport(device: IOHIDDevice, type: IOHIDReportType, id: CFIndex, length: CFIndex) -> (kern_return_t, [UInt8], CFIndex) {
+        var report = [UInt8](repeating: 0, count: Int(length))
+        var outLength = length
+        let result = IOHIDDeviceGetReport(device, type, id, &report, &outLength)
+        return (result, report, outLength)
+    }
+
     private func poll() {
         guard let device = hidDevice else { return }
 
-        var report = [UInt8](repeating: 0, count: Int(reportLength))
-        var length = reportLength
+        // On first few failures, try different report configurations
+        if !hasFirstReading && retryCount < 5 {
+            // Try configured values first
+            let (result, report, length) = tryGetReport(device: device, type: kIOHIDReportTypeFeature, id: reportID, length: reportLength)
 
-        let result = IOHIDDeviceGetReport(
-            device,
-            kIOHIDReportTypeFeature,
-            reportID,
-            &report,
-            &length
-        )
+            if result == kIOReturnSuccess && length >= 2 {
+                processReport(report: report, length: length)
+                return
+            }
 
-        guard result == kIOReturnSuccess else {
-            if !hasFirstReading {
-                log("GetReport failed: \(String(format: "0x%x", result)), length=\(length)")
+            retryCount += 1
+            log("Attempt \(retryCount): reportType=Feature reportID=\(reportID) len=\(reportLength) -> \(String(format: "0x%x", result))")
+
+            // Try alternative configurations
+            let attempts: [(IOHIDReportType, CFIndex, CFIndex)] = [
+                (kIOHIDReportTypeFeature, reportID, 3),
+                (kIOHIDReportTypeFeature, reportID, 4),
+                (kIOHIDReportTypeFeature, reportID, 8),
+                (kIOHIDReportTypeFeature, reportID, 16),
+                (kIOHIDReportTypeInput, reportID, reportLength),
+                (kIOHIDReportTypeInput, reportID, 3),
+                (kIOHIDReportTypeInput, reportID, 4),
+                (kIOHIDReportTypeFeature, 1, 3),
+                (kIOHIDReportTypeFeature, 1, 4),
+                (kIOHIDReportTypeFeature, 1, reportLength),
+            ]
+
+            for (type, id, len) in attempts {
+                let typeName = type == kIOHIDReportTypeFeature ? "Feature" : "Input"
+                let (r, rep, l) = tryGetReport(device: device, type: type, id: id, length: len)
+                if r == kIOReturnSuccess && l >= 2 {
+                    log("SUCCESS with reportType=\(typeName) reportID=\(id) len=\(len) -> got \(l) bytes")
+                    reportID = id
+                    reportLength = len
+                    processReport(report: rep, length: l)
+                    return
+                } else {
+                    log("  tried reportType=\(typeName) reportID=\(id) len=\(len) -> \(String(format: "0x%x", r))")
+                }
             }
             return
         }
 
-        guard length >= 3 else {
-            if !hasFirstReading {
-                log("Report too short: \(length) bytes")
-            }
-            return
+        // Normal path after first successful read
+        let (result, report, length) = tryGetReport(device: device, type: kIOHIDReportTypeFeature, id: reportID, length: reportLength)
+        if result == kIOReturnSuccess && length >= 2 {
+            processReport(report: report, length: length)
         }
+    }
 
-        // Raw angle from bytes 1-2 (little-endian 16-bit)
-        let rawAngle = Double(UInt16(report[1]) | (UInt16(report[2]) << 8))
+    private func processReport(report: [UInt8], length: CFIndex) {
+        // Try bytes 1-2 first (common when report ID prefix present), fall back to 0-1
+        let rawAngle: Double
+        if length >= 3 {
+            rawAngle = Double(UInt16(report[1]) | (UInt16(report[2]) << 8))
+        } else {
+            rawAngle = Double(UInt16(report[0]) | (UInt16(report[1]) << 8))
+        }
 
         if !hasFirstReading {
-            log("First reading: raw=\(rawAngle)° (bytes: \(report.prefix(Int(length)).map { String(format: "%02x", $0) }.joined(separator: " ")))")
+            let bytes = report.prefix(Int(length)).map { String(format: "%02x", $0) }.joined(separator: " ")
+            log("First reading: raw=\(rawAngle)° (bytes: \(bytes))")
             lastAngle = rawAngle
             hasFirstReading = true
         }
