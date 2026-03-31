@@ -7,6 +7,7 @@ struct ContentView: View {
     @State private var soundEnabled = false
     @State private var showFilePicker = false
     @State private var showSoundControls = false
+    @State private var selectedPreset: SoundPreset = .customFile
 
     // Bound parameters
     @State private var volume: Double = 0.8
@@ -51,25 +52,49 @@ struct ContentView: View {
 
             // MARK: - Sound Section
             VStack(spacing: 12) {
-                // File picker row
+                // Preset picker
                 HStack {
-                    Image(systemName: "waveform")
+                    Image(systemName: "music.note.list")
                         .foregroundStyle(.orange)
-                    if creakEngine.isFileLoaded {
-                        Text(creakEngine.loadedFileName)
-                            .font(.caption)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    } else {
-                        Text("No sound file loaded")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
+                    Picker("Sound", selection: $selectedPreset) {
+                        ForEach(SoundPreset.allCases) { preset in
+                            Text(preset.rawValue).tag(preset)
+                        }
                     }
-                    Spacer()
-                    Button("Choose File...") {
-                        showFilePicker = true
+                    .labelsHidden()
+                    .onChange(of: selectedPreset) {
+                        if selectedPreset == .customFile {
+                            // Restore custom file if available
+                            if !creakEngine.isFileLoaded || creakEngine.loadedFileName == creakEngine.currentPreset.rawValue {
+                                creakEngine.selectPreset(.customFile)
+                            }
+                        } else {
+                            creakEngine.selectPreset(selectedPreset)
+                        }
                     }
-                    .controlSize(.small)
+                }
+
+                // Custom file row (only for custom file preset)
+                if selectedPreset == .customFile {
+                    HStack {
+                        Image(systemName: "waveform")
+                            .foregroundStyle(.secondary)
+                        if creakEngine.isFileLoaded && creakEngine.currentPreset == .customFile {
+                            Text(creakEngine.loadedFileName)
+                                .font(.caption)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        } else {
+                            Text("No sound file loaded")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        }
+                        Spacer()
+                        Button("Choose File...") {
+                            showFilePicker = true
+                        }
+                        .controlSize(.small)
+                    }
                 }
 
                 // Play + Controls row

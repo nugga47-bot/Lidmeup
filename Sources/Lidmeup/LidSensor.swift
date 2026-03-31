@@ -39,6 +39,8 @@ final class LidSensor {
     private var hasFirstReading: Bool = false
     private var lastMovementTime: TimeInterval = 0
     private var movingVelocity: Double = 0
+    private var stableAngle: Double = 0.0      // Hysteresis: last committed angle
+    private var moveDirection: Double = 0.0     // Track consistent direction
 
     init() {}
 
@@ -245,6 +247,7 @@ final class LidSensor {
             let bytes = report.prefix(Int(length)).map { String(format: "%02x", $0) }.joined(separator: " ")
             log("First reading: raw=\(rawAngle)° (bytes: \(bytes))")
             lastAngle = rawAngle
+            stableAngle = rawAngle
             hasFirstReading = true
         }
 
@@ -252,23 +255,33 @@ final class LidSensor {
         let dt = now - lastTimestamp
         lastTimestamp = now
 
-        // Velocity with noise floor and short sustain to avoid jitter.
-        // The sensor polls at 30Hz (~33ms/frame). Slow lid movement may only
-        // register a change every few frames, so we sustain the last known
-        // velocity for a short window (150ms) to keep audio smooth.
-        let angleDelta = abs(rawAngle - lastAngle)
-        let sustainWindow = 0.15 // seconds — bridges gaps between sensor ticks
+        // Hysteresis-based movement detection.
+        // The sensor returns integer values, so when the lid sits between
+        // two positions (e.g. 111/112), it oscillates. We use a "stable angle"
+        // that only updates when the raw angle moves consistently in one
+        // direction by more than 1.5 degrees from the stable position.
+        let deltaFromStable = rawAngle - stableAngle
+        let sustainWindow = 0.15
 
-        if dt > 0 && angleDelta >= 0.1 {
-            // Real movement detected
-            movingVelocity = angleDelta / dt
+        if abs(deltaFromStable) >= 1.5 {
+            // Significant movement from stable position — commit it
+            let direction = deltaFromStable > 0 ? 1.0 : -1.0
+
+            if dt > 0 {
+                movingVelocity = abs(deltaFromStable) / dt
+            }
             lastMovementTime = now
+            velocity = movingVelocity
+            moveDirection = direction
+            stableAngle = rawAngle
+        } else if abs(rawAngle - lastAngle) >= 0.1 && (now - lastMovementTime) < 0.05 {
+            // Small movement but we just moved — keep sustaining
             velocity = movingVelocity
         } else if (now - lastMovementTime) < sustainWindow {
             // Within sustain window — hold last velocity
             velocity = movingVelocity
         } else {
-            // No movement for longer than sustain — zero out
+            // No real movement — zero out
             velocity = 0
             movingVelocity = 0
         }
