@@ -15,17 +15,17 @@ final class CreakAudioEngine {
 
     // User-adjustable parameters
     var masterVolume: Float = 0.8       // 0.0 - 1.0
-    var fadeSpeed: Double = 5.0         // Fade time in ms (lower = snappier, near-instant by default)
+    var fadeSpeed: Double = 5.0         // Fade time in ms (lower = snappier)
     var minRate: Float = 0.80           // Playback rate when slow
     var maxRate: Float = 1.20           // Playback rate when fast
     var velocityThreshold: Double = 0.5 // Min velocity to trigger sound (deg/s)
     var velocityFullResponse: Double = 10.0 // Velocity for max volume (deg/s)
 
-    // Internal state
-    nonisolated(unsafe) private var currentGain: Float = 0
-    nonisolated(unsafe) private var targetGain: Float = 0
-    private var fadeTimer: Timer?
+    // Current state from sensor (written by main thread via feed())
+    private var lastVelocity: Double = 0
+    private var lastAngle: Double = 0
 
+    private var updateTimer: Timer?
     private let savedFileKey = "lidmeup_audio_file"
 
     init() {
@@ -66,7 +66,6 @@ final class CreakAudioEngine {
             loadedFileName = url.lastPathComponent
             isFileLoaded = true
 
-            // Save bookmark for persistence
             if saveBookmark {
                 if let bookmark = try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil) {
                     UserDefaults.standard.set(bookmark, forKey: savedFileKey)
@@ -94,14 +93,13 @@ final class CreakAudioEngine {
             playerNode.scheduleBuffer(buffer, at: nil, options: .loops)
             playerNode.play()
             playerNode.volume = 0
-            currentGain = 0
             isRunning = true
 
-            // Start fade timer for smooth volume transitions
-            fadeTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
-                self?.updateFade()
+            // Own update loop at 60Hz to continuously apply volume from latest velocity
+            updateTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+                self?.updateVolume()
             }
-            RunLoop.current.add(fadeTimer!, forMode: .common)
+            RunLoop.current.add(updateTimer!, forMode: .common)
 
             print("[CreakAudioEngine] Started playback")
         } catch {
@@ -111,46 +109,50 @@ final class CreakAudioEngine {
 
     func stop() {
         guard isRunning else { return }
-        fadeTimer?.invalidate()
-        fadeTimer = nil
+        updateTimer?.invalidate()
+        updateTimer = nil
         playerNode.stop()
         engine.stop()
         isRunning = false
-        currentGain = 0
-        targetGain = 0
+        lastVelocity = 0
         playerNode.volume = 0
     }
 
-    // MARK: - Feed from sensor
+    // MARK: - Feed from sensor (called every sensor poll)
 
     func feed(angle: Double, velocity: Double) {
-        guard isRunning else { return }
-
-        // Map velocity to target gain using smoothstep
-        let gain: Float
-        if velocity <= velocityThreshold {
-            gain = 0
-        } else if velocity >= velocityFullResponse {
-            gain = masterVolume
-        } else {
-            let t = Float((velocity - velocityThreshold) / (velocityFullResponse - velocityThreshold))
-            let smooth = t * t * (3 - 2 * t)
-            gain = smooth * masterVolume
-        }
-        targetGain = gain
-
-        // Map velocity to playback rate
-        let rateFraction = Float(min(1.0, max(0.0, velocity / velocityFullResponse)))
-        varispeed.rate = minRate + (maxRate - minRate) * rateFraction
+        lastAngle = angle
+        lastVelocity = velocity
     }
 
-    // MARK: - Smooth fade
+    // MARK: - Volume update (runs at 60Hz independently)
 
-    private func updateFade() {
+    private func updateVolume() {
+        // Compute target gain from current velocity
+        let targetGain: Float
+        if lastVelocity <= velocityThreshold {
+            targetGain = 0
+        } else if lastVelocity >= velocityFullResponse {
+            targetGain = masterVolume
+        } else {
+            let t = Float((lastVelocity - velocityThreshold) / (velocityFullResponse - velocityThreshold))
+            let smooth = t * t * (3 - 2 * t)
+            targetGain = smooth * masterVolume
+        }
+
+        // Apply fade
         let alpha = Float(min(1.0, (1.0 / 60.0) / (fadeSpeed / 1000.0)))
-        currentGain += (targetGain - currentGain) * alpha
-        // Snap to zero if very quiet
-        if currentGain < 0.005 { currentGain = 0 }
-        playerNode.volume = currentGain
+        var newGain = playerNode.volume + (targetGain - playerNode.volume) * alpha
+
+        // Snap to zero when fading out and nearly silent
+        if targetGain == 0 && newGain < 0.01 {
+            newGain = 0
+        }
+
+        playerNode.volume = newGain
+
+        // Playback rate from velocity
+        let rateFraction = Float(min(1.0, max(0.0, lastVelocity / velocityFullResponse)))
+        varispeed.rate = minRate + (maxRate - minRate) * rateFraction
     }
 }

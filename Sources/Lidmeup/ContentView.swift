@@ -149,6 +149,11 @@ struct ContentView: View {
                 creakEngine.feed(angle: sensor.angle, velocity: sensor.velocity)
             }
         }
+        .onChange(of: sensor.velocity) {
+            if soundEnabled {
+                creakEngine.feed(angle: sensor.angle, velocity: sensor.velocity)
+            }
+        }
         .onChange(of: volume) { creakEngine.masterVolume = Float(volume) }
         .onChange(of: fadeSpeed) { creakEngine.fadeSpeed = fadeSpeed }
         .onChange(of: minRate) { creakEngine.minRate = Float(minRate) }
