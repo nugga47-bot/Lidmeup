@@ -137,7 +137,7 @@ struct ContentView: View {
             }
         }
         .padding(24)
-        .frame(width: 400, minHeight: 560)
+        .frame(width: 400, height: 560)
         .onAppear {
             sensor.start()
         }
