@@ -252,9 +252,14 @@ final class LidSensor {
         let dt = now - lastTimestamp
         lastTimestamp = now
 
-        // Direct velocity from raw angle delta — no smoothing
-        if dt > 0 {
-            velocity = abs(rawAngle - lastAngle) / dt
+        // Velocity from angle delta — with noise floor to avoid phantom movement
+        let angleDelta = abs(rawAngle - lastAngle)
+        if dt > 0 && angleDelta >= 0.5 {
+            // Real movement (at least 0.5 degree change between frames)
+            velocity = angleDelta / dt
+        } else {
+            // No meaningful movement — zero immediately
+            velocity = 0
         }
 
         lastAngle = rawAngle
