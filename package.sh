@@ -4,20 +4,19 @@ set -e
 APP_NAME="Lidmeup"
 APP_BUNDLE="$APP_NAME.app"
 BUILD_DIR=".build/release"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "=== Packaging $APP_NAME ==="
 
 # Step 1: Build release binary
-echo "[1/3] Building release binary..."
+echo "[1/4] Building release binary..."
 swift build -c release
 
 # Step 2: Generate app icon
-echo "[2/3] Generating app icon..."
+echo "[2/4] Generating app icon..."
 swift Scripts/generate_icon.swift "/tmp/$APP_NAME.icns"
 
 # Step 3: Create .app bundle
-echo "[3/3] Creating $APP_BUNDLE..."
+echo "[3/4] Creating $APP_BUNDLE..."
 
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
@@ -64,15 +63,19 @@ PLIST
 # Create PkgInfo
 echo -n "APPL????" > "$APP_BUNDLE/Contents/PkgInfo"
 
+# Step 4: Ad-hoc code sign with entitlements for HID access
+echo "[4/4] Code signing..."
+codesign --force --sign - --entitlements Lidmeup.entitlements --deep "$APP_BUNDLE"
+
 echo ""
 echo "=== Done! ==="
 echo ""
 echo "Your app is ready: $(pwd)/$APP_BUNDLE"
 echo ""
-echo "To install:"
-echo "  cp -r $APP_BUNDLE /Applications/"
-echo ""
-echo "Or just double-click $APP_BUNDLE in Finder to run it."
+echo "IMPORTANT: After first launch, if the sensor doesn't work:"
+echo "  1. Open System Settings > Privacy & Security > Input Monitoring"
+echo "  2. Remove Lidmeup if it's listed, then re-add it"
+echo "  3. Relaunch the app"
 echo ""
 echo "To open it now:"
 echo "  open $APP_BUNDLE"
