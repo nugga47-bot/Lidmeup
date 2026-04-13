@@ -6,6 +6,7 @@ enum SoundPreset: String, CaseIterable, Identifiable {
     case metallicClick = "Metallic Knob Click"
     case iPodClick = "iPod Click Wheel"
     case donkeyScream = "Donkey Scream"
+    case fart = "Fart"
 
     var id: String { rawValue }
 
@@ -13,7 +14,7 @@ enum SoundPreset: String, CaseIterable, Identifiable {
     var isOneShot: Bool {
         switch self {
         case .metallicClick, .iPodClick: return true
-        case .donkeyScream, .customFile: return false
+        case .donkeyScream, .fart, .customFile: return false
         }
     }
 }
@@ -28,6 +29,7 @@ struct SoundGenerator {
         case .metallicClick: return metallicClick()
         case .iPodClick: return iPodClick()
         case .donkeyScream: return donkeyScream()
+        case .fart: return fart()
         }
     }
 
@@ -162,6 +164,73 @@ struct SoundGenerator {
             sample = sample / (1.0 + abs(sample) * 0.5) // Soft clip
 
             data[i] = Float(sample * 0.7)
+        }
+
+        buffer.frameLength = AVAudioFrameCount(frameCount)
+        return buffer
+    }
+
+    // MARK: - Fart (~1.5 seconds, loops)
+    // Low-frequency rumble with noise bursts, pitch drops, and sputtering
+
+    static func fart() -> AVAudioPCMBuffer? {
+        let duration = 1.5
+        let frameCount = Int(sampleRate * duration)
+        guard let buffer = createBuffer(frameCount: frameCount) else { return nil }
+        let data = buffer.floatChannelData![0]
+
+        var phase: Double = 0
+        var noiseState: Double = 0
+
+        for i in 0..<frameCount {
+            let t = Double(i) / sampleRate
+            let tNorm = t / duration
+
+            // Envelope: quick attack, sustained, sputtering end
+            let envelope: Double
+            if tNorm < 0.05 {
+                envelope = tNorm / 0.05  // Attack
+            } else if tNorm < 0.6 {
+                envelope = 1.0  // Sustain
+            } else {
+                // Sputtering fade: multiply by a choppy pattern
+                let fadeT = (tNorm - 0.6) / 0.4
+                let chop = sin(tNorm * 80.0) > 0 ? 1.0 : 0.3
+                envelope = (1.0 - fadeT) * chop
+            }
+
+            // Base frequency: starts ~80Hz, drops to ~40Hz
+            let baseFreq = 80.0 - 40.0 * tNorm
+
+            // Sub-oscillations for the "flapping" character
+            let flap = sin(2.0 * .pi * 18.0 * t) * 0.5
+            let freq = baseFreq * (1.0 + flap * 0.3)
+
+            // Advance phase
+            phase += freq / sampleRate
+            phase -= Double(Int(phase))
+
+            // Mix of: low square-ish wave + filtered noise
+            let square = phase < 0.4 ? 0.8 : -0.8
+            let saw = 2.0 * phase - 1.0
+            let bass = square * 0.5 + saw * 0.3
+
+            // Brown noise (random walk, low-pass)
+            noiseState += Double.random(in: -0.15...0.15)
+            noiseState *= 0.97  // Decay to keep bounded
+            let noise = noiseState
+
+            // Bubbling: amplitude modulated noise bursts
+            let bubble = sin(2.0 * .pi * 25.0 * t)
+            let bubbleEnv = max(0, bubble) // Only positive half
+            let bubblyNoise = noise * bubbleEnv * 0.6
+
+            var sample = (bass + bubblyNoise) * envelope
+
+            // Soft clip
+            sample = sample / (1.0 + abs(sample) * 0.3)
+
+            data[i] = Float(sample * 0.75)
         }
 
         buffer.frameLength = AVAudioFrameCount(frameCount)
