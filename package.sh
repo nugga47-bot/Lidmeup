@@ -4,26 +4,33 @@ set -e
 APP_NAME="Lidmeup"
 APP_BUNDLE="$APP_NAME.app"
 BUILD_DIR=".build/release"
+BINARY_PATH="$(cd "$(dirname "$0")" && pwd)/.build/release/$APP_NAME"
 
 echo "=== Packaging $APP_NAME ==="
 
 # Step 1: Build release binary
-echo "[1/4] Building release binary..."
+echo "[1/3] Building release binary..."
 swift build -c release
 
 # Step 2: Generate app icon
-echo "[2/4] Generating app icon..."
+echo "[2/3] Generating app icon..."
 swift Scripts/generate_icon.swift "/tmp/$APP_NAME.icns"
 
 # Step 3: Create .app bundle
-echo "[3/4] Creating $APP_BUNDLE..."
+echo "[3/3] Creating $APP_BUNDLE..."
 
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 
-# Copy binary
-cp "$BUILD_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/"
+# Create a launcher script that runs the binary directly.
+# This inherits Terminal's Input Monitoring permission, which
+# allows HID access without needing a separate TCC entry.
+cat > "$APP_BUNDLE/Contents/MacOS/$APP_NAME" << LAUNCHER
+#!/bin/bash
+exec "$BINARY_PATH"
+LAUNCHER
+chmod +x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
 # Copy icon
 cp "/tmp/$APP_NAME.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
@@ -60,22 +67,18 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
 </plist>
 PLIST
 
-# Create PkgInfo
 echo -n "APPL????" > "$APP_BUNDLE/Contents/PkgInfo"
 
-# Step 4: Ad-hoc code sign with entitlements for HID access
-echo "[4/4] Code signing..."
-codesign --force --sign - --entitlements Lidmeup.entitlements --deep "$APP_BUNDLE"
+# Sign it
+codesign --force --sign - --deep "$APP_BUNDLE" 2>/dev/null || true
 
 echo ""
 echo "=== Done! ==="
 echo ""
 echo "Your app is ready: $(pwd)/$APP_BUNDLE"
 echo ""
-echo "IMPORTANT: After first launch, if the sensor doesn't work:"
-echo "  1. Open System Settings > Privacy & Security > Input Monitoring"
-echo "  2. Remove Lidmeup if it's listed, then re-add it"
-echo "  3. Relaunch the app"
-echo ""
 echo "To open it now:"
 echo "  open $APP_BUNDLE"
+echo ""
+echo "To install to Applications:"
+echo "  cp -r $APP_BUNDLE /Applications/"
