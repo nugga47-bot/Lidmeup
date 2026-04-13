@@ -52,32 +52,28 @@ final class CreakAudioEngine {
     // MARK: - Build a fresh engine for the current mode
 
     private func buildEngine() {
-        // Create completely new instances to avoid any cached format state
         engine = AVAudioEngine()
         playerNode = AVAudioPlayerNode()
         clickPlayerNode = AVAudioPlayerNode()
         varispeed = AVAudioUnitVarispeed()
 
-        // Use the output hardware format for the final connection to mixer
-        let outputFormat = engine.outputNode.outputFormat(forBus: 0)
-
         if isOneShotMode {
             engine.attach(clickPlayerNode)
             engine.connect(clickPlayerNode, to: engine.mainMixerNode, format: monoFormat)
             clickPlayerNode.volume = masterVolume
-        } else {
-            let sourceFormat: AVAudioFormat
-            if currentPreset == .customFile, let cf = customFileFormat {
-                sourceFormat = cf
-            } else {
-                sourceFormat = monoFormat
-            }
+        } else if currentPreset == .customFile, let cf = customFileFormat {
+            // Custom file: use varispeed for pitch modulation
             engine.attach(playerNode)
             engine.attach(varispeed)
-            engine.connect(playerNode, to: varispeed, format: sourceFormat)
-            engine.connect(varispeed, to: engine.mainMixerNode, format: outputFormat)
+            engine.connect(playerNode, to: varispeed, format: cf)
+            engine.connect(varispeed, to: engine.mainMixerNode, format: cf)
             playerNode.volume = 0
             varispeed.rate = 1.0
+        } else {
+            // Procedural presets: direct to mixer, no varispeed
+            engine.attach(playerNode)
+            engine.connect(playerNode, to: engine.mainMixerNode, format: monoFormat)
+            playerNode.volume = 0
         }
     }
 
@@ -255,15 +251,18 @@ final class CreakAudioEngine {
 
         playerNode.volume = currentVolume
 
-        let targetRate: Float
-        if latestVelocity <= velocityThreshold {
-            targetRate = minRate
-        } else {
-            let rateFraction = Float(min(1.0, latestVelocity / velocityFullResponse))
-            targetRate = minRate + (maxRate - minRate) * rateFraction
+        // Only apply rate changes for custom files (varispeed is connected)
+        if currentPreset == .customFile {
+            let targetRate: Float
+            if latestVelocity <= velocityThreshold {
+                targetRate = minRate
+            } else {
+                let rateFraction = Float(min(1.0, latestVelocity / velocityFullResponse))
+                targetRate = minRate + (maxRate - minRate) * rateFraction
+            }
+            let rateAlpha = min(1.0, dt / 0.1)
+            currentRate += (targetRate - currentRate) * rateAlpha
+            varispeed.rate = currentRate
         }
-        let rateAlpha = min(1.0, dt / 0.1)
-        currentRate += (targetRate - currentRate) * rateAlpha
-        varispeed.rate = currentRate
     }
 }
