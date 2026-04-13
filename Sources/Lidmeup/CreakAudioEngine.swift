@@ -52,28 +52,30 @@ final class CreakAudioEngine {
     // MARK: - Build a fresh engine for the current mode
 
     private func buildEngine() {
+        // Create completely new instances to avoid any cached format state
         engine = AVAudioEngine()
         playerNode = AVAudioPlayerNode()
         clickPlayerNode = AVAudioPlayerNode()
         varispeed = AVAudioUnitVarispeed()
 
+        // Use the output hardware format for the final connection to mixer
+        let outputFormat = engine.outputNode.outputFormat(forBus: 0)
+
         if isOneShotMode {
-            // One-shot: clickPlayerNode → mixer
             engine.attach(clickPlayerNode)
             engine.connect(clickPlayerNode, to: engine.mainMixerNode, format: monoFormat)
             clickPlayerNode.volume = masterVolume
         } else {
-            // Continuous: playerNode → varispeed → mixer
-            let format: AVAudioFormat
+            let sourceFormat: AVAudioFormat
             if currentPreset == .customFile, let cf = customFileFormat {
-                format = cf
+                sourceFormat = cf
             } else {
-                format = monoFormat
+                sourceFormat = monoFormat
             }
             engine.attach(playerNode)
             engine.attach(varispeed)
-            engine.connect(playerNode, to: varispeed, format: format)
-            engine.connect(varispeed, to: engine.mainMixerNode, format: nil)
+            engine.connect(playerNode, to: varispeed, format: sourceFormat)
+            engine.connect(varispeed, to: engine.mainMixerNode, format: outputFormat)
             playerNode.volume = 0
             varispeed.rate = 1.0
         }
