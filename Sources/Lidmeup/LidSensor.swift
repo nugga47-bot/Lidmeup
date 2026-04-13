@@ -39,8 +39,9 @@ final class LidSensor {
     private var hasFirstReading: Bool = false
     private var lastMovementTime: TimeInterval = 0
     private var movingVelocity: Double = 0
-    private var stableAngle: Double = 0.0      // Hysteresis: last committed angle
-    private var moveDirection: Double = 0.0     // Track consistent direction
+    private var stableAngle: Double = 0.0
+    private var moveDirection: Double = 0.0
+    private var deviceAlreadyOpen: Bool = false
 
     init() {}
 
@@ -64,14 +65,16 @@ final class LidSensor {
             return
         }
 
-        // Open the device for reading
-        let openResult = IOHIDDeviceOpen(hidDevice!, IOOptionBits(kIOHIDOptionsTypeNone))
-        guard openResult == kIOReturnSuccess else {
-            log("Failed to open HID device: \(String(format: "0x%x", openResult))")
-            statusMessage = "Could not open sensor (error: \(String(format: "0x%x", openResult)))"
-            isAvailable = false
-            hidDevice = nil
-            return
+        // Open the device for reading (skip if already opened by fallback)
+        if !deviceAlreadyOpen {
+            let openResult = IOHIDDeviceOpen(hidDevice!, IOOptionBits(kIOHIDOptionsTypeNone))
+            guard openResult == kIOReturnSuccess else {
+                log("Failed to open HID device: \(String(format: "0x%x", openResult))")
+                statusMessage = "Could not open sensor (error: \(String(format: "0x%x", openResult)))"
+                isAvailable = false
+                hidDevice = nil
+                return
+            }
         }
 
         isAvailable = true
@@ -100,12 +103,19 @@ final class LidSensor {
         let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
         IOHIDManagerSetDeviceMatching(manager, nil)
 
-        // Schedule on run loop so device enumeration works
-        IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
+        // Try opening without run loop scheduling first
+        var openResult = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
 
-        let openResult = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
-        guard openResult == kIOReturnSuccess else {
-            log("Failed to open HID manager: \(String(format: "0x%x", openResult))")
+        if openResult != kIOReturnSuccess {
+            // Retry: schedule on run loop then open
+            IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
+            openResult = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+        }
+
+        if openResult != kIOReturnSuccess {
+            // Last resort: try with kIOMainPortDefault-based matching
+            log("HID manager open failed (\(String(format: "0x%x", openResult))), trying IOService approach...")
+            findSensorViaIOService()
             return
         }
 
@@ -289,5 +299,73 @@ final class LidSensor {
         lastAngle = rawAngle
         angle = rawAngle
         statusMessage = "Monitoring lid position..."
+    }
+
+    // MARK: - Fallback: IOService-based HID access (no IOHIDManager)
+
+    private func findSensorViaIOService() {
+        // Enumerate all HID devices via IOService matching
+        var iterator: io_iterator_t = 0
+        let matching = IOServiceMatching("IOHIDDevice")
+        let result = IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator)
+        guard result == KERN_SUCCESS else {
+            log("IOServiceGetMatchingServices failed: \(String(format: "0x%x", result))")
+            return
+        }
+        defer { IOObjectRelease(iterator) }
+
+        var deviceCount = 0
+        var entry = IOIteratorNext(iterator)
+        while entry != IO_OBJECT_NULL {
+            deviceCount += 1
+            // Try to create an IOHIDDevice from this service entry
+            let device = IOHIDDeviceCreate(kCFAllocatorDefault, entry)
+            IOObjectRelease(entry)
+
+            if let device = device {
+                let dev = device as IOHIDDevice
+
+                // Check for lid angle element
+                if let elements = IOHIDDeviceCopyMatchingElements(dev, nil, IOOptionBits(kIOHIDOptionsTypeNone)) as? [IOHIDElement] {
+                    for element in elements {
+                        let usagePage = IOHIDElementGetUsagePage(element)
+                        let usage = IOHIDElementGetUsage(element)
+
+                        if usagePage == 0x0020 && usage == 0x008A {
+                            self.reportID = CFIndex(IOHIDElementGetReportID(element))
+                            let maxSize = IOHIDDeviceGetProperty(dev, kIOHIDMaxFeatureReportSizeKey as CFString) as? Int ?? 0
+                            let elementReportSize = IOHIDElementGetReportSize(element)
+                            let elementReportCount = IOHIDElementGetReportCount(element)
+
+                            if maxSize > 0 {
+                                self.reportLength = CFIndex(maxSize)
+                            } else {
+                                self.reportLength = CFIndex((elementReportSize * elementReportCount / 8) + 1)
+                            }
+                            if self.reportLength < 3 { self.reportLength = 3 }
+
+                            let deviceName = IOHIDDeviceGetProperty(dev, kIOHIDProductKey as CFString) as? String ?? "Unknown"
+                            log("Found sensor via IOService on '\(deviceName)' (reportID=\(reportID), reportLength=\(reportLength))")
+
+                            // Open the device directly
+                            let openResult = IOHIDDeviceOpen(dev, IOOptionBits(kIOHIDOptionsTypeNone))
+                            if openResult == kIOReturnSuccess {
+                                hidDevice = dev
+                                deviceAlreadyOpen = true
+                                statusMessage = "Found lid angle sensor"
+                                log("Device opened successfully via IOService fallback (\(deviceCount) devices scanned)")
+                                return
+                            } else {
+                                log("Found sensor but failed to open device: \(String(format: "0x%x", openResult))")
+                            }
+                        }
+                    }
+                }
+            }
+
+            entry = IOIteratorNext(iterator)
+        }
+
+        log("No lid angle sensor found via IOService (\(deviceCount) HID devices scanned)")
     }
 }
