@@ -1,9 +1,6 @@
 import AVFoundation
 import Foundation
 
-/// Plays sound in response to lid movement.
-/// Fully rebuilds the audio engine graph when switching between modes
-/// to avoid Core Audio graph initialization errors.
 final class CreakAudioEngine {
     private var engine: AVAudioEngine!
     private var playerNode: AVAudioPlayerNode!
@@ -11,13 +8,17 @@ final class CreakAudioEngine {
     private var varispeed: AVAudioUnitVarispeed!
     private var audioBuffer: AVAudioPCMBuffer?
     private var clickBuffer: AVAudioPCMBuffer?
-    private var customFileBuffer: AVAudioPCMBuffer?
-    private var customFileFormat: AVAudioFormat?
     private(set) var isRunning = false
     private(set) var isFileLoaded = false
     private(set) var loadedFileName: String = ""
-    private(set) var currentPreset: SoundPreset = .customFile
+    private(set) var currentPreset: SoundPreset = .customFile1
     private var isOneShotMode = false
+
+    // Per-slot storage
+    private var slotBuffers: [SoundPreset: AVAudioPCMBuffer] = [:]
+    private var slotFormats: [SoundPreset: AVAudioFormat] = [:]
+    private var slotFileNames: [SoundPreset: String] = [:]
+    private var currentCustomFormat: AVAudioFormat?
 
     // User-adjustable parameters
     var masterVolume: Float = 0.8
@@ -35,21 +36,47 @@ final class CreakAudioEngine {
     private var currentRate: Float = 1.0
     private var updateTimer: Timer?
 
-    private let savedFileKey = "lidmeup_audio_file"
     private let monoFormat = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1)!
+    private let savedPresetKey = "lidmeup_selected_preset"
 
     init() {
-        // Restore last used custom file
-        if let bookmark = UserDefaults.standard.data(forKey: savedFileKey) {
-            var isStale = false
-            if let url = try? URL(resolvingBookmarkData: bookmark, options: .withSecurityScope, bookmarkDataIsStale: &isStale),
-               url.startAccessingSecurityScopedResource() {
-                loadFileIntoBuffer(url: url)
-            }
+        // Restore saved files for all custom slots
+        for preset in SoundPreset.allCases where preset.isCustom {
+            restoreFile(for: preset)
+        }
+
+        // Restore last selected preset
+        if let savedPreset = UserDefaults.standard.string(forKey: savedPresetKey),
+           let preset = SoundPreset.allCases.first(where: { $0.rawValue == savedPreset }) {
+            currentPreset = preset
+            selectPreset(preset)
         }
     }
 
-    // MARK: - Build a fresh engine for the current mode
+    // MARK: - File persistence per slot
+
+    private func restoreFile(for preset: SoundPreset) {
+        guard let bookmark = UserDefaults.standard.data(forKey: preset.bookmarkKey) else { return }
+        var isStale = false
+        guard let url = try? URL(resolvingBookmarkData: bookmark, options: .withSecurityScope, bookmarkDataIsStale: &isStale),
+              url.startAccessingSecurityScopedResource() else { return }
+
+        do {
+            let file = try AVAudioFile(forReading: url)
+            let format = file.processingFormat
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(file.length)) else { return }
+            try file.read(into: buffer)
+
+            slotBuffers[preset] = buffer
+            slotFormats[preset] = format
+            slotFileNames[preset] = url.lastPathComponent
+            print("[CreakAudioEngine] Restored \(preset.rawValue): \(url.lastPathComponent)")
+        } catch {
+            print("[CreakAudioEngine] Failed to restore \(preset.rawValue): \(error)")
+        }
+    }
+
+    // MARK: - Build engine
 
     private func buildEngine() {
         engine = AVAudioEngine()
@@ -61,8 +88,7 @@ final class CreakAudioEngine {
             engine.attach(clickPlayerNode)
             engine.connect(clickPlayerNode, to: engine.mainMixerNode, format: monoFormat)
             clickPlayerNode.volume = masterVolume
-        } else if currentPreset == .customFile, let cf = customFileFormat {
-            // Custom file: use varispeed for pitch modulation
+        } else if currentPreset.isCustom, let cf = currentCustomFormat {
             engine.attach(playerNode)
             engine.attach(varispeed)
             engine.connect(playerNode, to: varispeed, format: cf)
@@ -70,7 +96,6 @@ final class CreakAudioEngine {
             playerNode.volume = 0
             varispeed.rate = 1.0
         } else {
-            // Procedural presets: direct to mixer, no varispeed
             engine.attach(playerNode)
             engine.connect(playerNode, to: engine.mainMixerNode, format: monoFormat)
             playerNode.volume = 0
@@ -86,11 +111,15 @@ final class CreakAudioEngine {
         currentPreset = preset
         isOneShotMode = preset.isOneShot
 
-        if preset == .customFile {
-            audioBuffer = customFileBuffer
+        // Save selection
+        UserDefaults.standard.set(preset.rawValue, forKey: savedPresetKey)
+
+        if preset.isCustom {
+            audioBuffer = slotBuffers[preset]
+            currentCustomFormat = slotFormats[preset]
+            loadedFileName = slotFileNames[preset] ?? ""
+            isFileLoaded = audioBuffer != nil
             clickBuffer = nil
-            isFileLoaded = customFileBuffer != nil
-            loadedFileName = isFileLoaded ? (loadedFileName.isEmpty ? "Custom" : loadedFileName) : ""
         } else {
             if let buffer = SoundGenerator.generateBuffer(for: preset) {
                 if preset.isOneShot {
@@ -102,63 +131,63 @@ final class CreakAudioEngine {
                 }
                 loadedFileName = preset.rawValue
                 isFileLoaded = true
-                print("[CreakAudioEngine] Generated \(preset.rawValue): \(buffer.frameLength) frames")
             }
+            currentCustomFormat = nil
         }
 
         if wasRunning && isFileLoaded { start() }
     }
 
-    // MARK: - File Loading
+    // MARK: - File Loading (into current custom slot)
 
-    private func loadFileIntoBuffer(url: URL) {
+    func loadFile(url: URL) {
+        guard currentPreset.isCustom else { return }
+
+        let wasRunning = isRunning
+        if wasRunning { stop() }
+
         do {
             let file = try AVAudioFile(forReading: url)
             let format = file.processingFormat
             guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(file.length)) else { return }
             try file.read(into: buffer)
 
-            customFileBuffer = buffer
-            customFileFormat = format
+            slotBuffers[currentPreset] = buffer
+            slotFormats[currentPreset] = format
+            slotFileNames[currentPreset] = url.lastPathComponent
+
             audioBuffer = buffer
+            currentCustomFormat = format
             loadedFileName = url.lastPathComponent
             isFileLoaded = true
+            isOneShotMode = false
+            clickBuffer = nil
 
-            print("[CreakAudioEngine] Loaded: \(loadedFileName) (\(file.length) frames, \(format.sampleRate)Hz)")
+            // Save bookmark for this slot
+            if let bookmark = try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil) {
+                UserDefaults.standard.set(bookmark, forKey: currentPreset.bookmarkKey)
+            }
+
+            print("[CreakAudioEngine] Loaded \(currentPreset.rawValue): \(loadedFileName) (\(file.length) frames, \(format.sampleRate)Hz)")
         } catch {
             print("[CreakAudioEngine] Failed to load: \(error)")
-        }
-    }
-
-    func loadFile(url: URL, saveBookmark: Bool = true) {
-        let wasRunning = isRunning
-        if wasRunning { stop() }
-
-        loadFileIntoBuffer(url: url)
-
-        currentPreset = .customFile
-        isOneShotMode = false
-        clickBuffer = nil
-
-        if saveBookmark {
-            if let bookmark = try? url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil) {
-                UserDefaults.standard.set(bookmark, forKey: savedFileKey)
-            }
+            isFileLoaded = false
         }
 
         if wasRunning && isFileLoaded { start() }
     }
 
+    /// Returns the saved filename for a custom slot (for UI display)
+    func fileName(for preset: SoundPreset) -> String? {
+        slotFileNames[preset]
+    }
+
     // MARK: - Playback
 
     func start() {
-        guard isFileLoaded else {
-            print("[CreakAudioEngine] No audio loaded")
-            return
-        }
+        guard isFileLoaded else { return }
         guard !isRunning else { return }
 
-        // Build a fresh engine every time to avoid graph corruption
         buildEngine()
 
         do {
@@ -181,8 +210,6 @@ final class CreakAudioEngine {
                 self?.updateAudio()
             }
             RunLoop.current.add(updateTimer!, forMode: .common)
-
-            print("[CreakAudioEngine] Started (\(isOneShotMode ? "one-shot" : "continuous") mode)")
         } catch {
             print("[CreakAudioEngine] Failed to start: \(error)")
         }
@@ -192,11 +219,9 @@ final class CreakAudioEngine {
         guard isRunning else { return }
         updateTimer?.invalidate()
         updateTimer = nil
-
         playerNode?.stop()
         clickPlayerNode?.stop()
         engine?.stop()
-
         isRunning = false
         latestVelocity = 0
         currentVolume = 0
@@ -221,7 +246,6 @@ final class CreakAudioEngine {
 
     private func updateOneShot() {
         guard let buffer = clickBuffer else { return }
-
         let angleDelta = abs(latestAngle - lastClickAngle)
         if angleDelta >= 1.0 && latestVelocity > velocityThreshold {
             clickPlayerNode.scheduleBuffer(buffer, at: nil, options: [])
@@ -243,16 +267,11 @@ final class CreakAudioEngine {
         let dt: Float = 1.0 / 60.0
         let tau = Float(fadeSpeed / 1000.0)
         let alpha = min(1.0, dt / max(tau, 0.001))
-
         currentVolume += (targetVolume - currentVolume) * alpha
-        if targetVolume == 0 && currentVolume < 0.01 {
-            currentVolume = 0
-        }
-
+        if targetVolume == 0 && currentVolume < 0.01 { currentVolume = 0 }
         playerNode.volume = currentVolume
 
-        // Only apply rate changes for custom files (varispeed is connected)
-        if currentPreset == .customFile {
+        if currentPreset.isCustom {
             let targetRate: Float
             if latestVelocity <= velocityThreshold {
                 targetRate = minRate

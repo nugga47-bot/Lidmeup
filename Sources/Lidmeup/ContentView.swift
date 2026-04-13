@@ -7,9 +7,8 @@ struct ContentView: View {
     @State private var soundEnabled = false
     @State private var showFilePicker = false
     @State private var showSoundControls = false
-    @State private var selectedPreset: SoundPreset = .customFile
+    @State private var selectedPreset: SoundPreset = .customFile1
 
-    // Bound parameters
     @State private var volume: Double = 0.8
     @State private var fadeSpeed: Double = 20.0
     @State private var minRate: Double = 0.80
@@ -58,7 +57,15 @@ struct ContentView: View {
                         .foregroundStyle(.orange)
                     Picker("Sound", selection: $selectedPreset) {
                         ForEach(SoundPreset.allCases) { preset in
-                            Text(preset.rawValue).tag(preset)
+                            if preset.isCustom {
+                                if let name = creakEngine.fileName(for: preset) {
+                                    Text("\(preset.rawValue) - \(name)").tag(preset)
+                                } else {
+                                    Text("\(preset.rawValue) (empty)").tag(preset)
+                                }
+                            } else {
+                                Text(preset.rawValue).tag(preset)
+                            }
                         }
                     }
                     .labelsHidden()
@@ -67,13 +74,13 @@ struct ContentView: View {
                     }
                 }
 
-                // Custom file row (only for custom file preset)
-                if selectedPreset == .customFile {
+                // File chooser for custom slots
+                if selectedPreset.isCustom {
                     HStack {
                         Image(systemName: "waveform")
                             .foregroundStyle(.secondary)
-                        if creakEngine.isFileLoaded && creakEngine.currentPreset == .customFile {
-                            Text(creakEngine.loadedFileName)
+                        if let name = creakEngine.fileName(for: selectedPreset) {
+                            Text(name)
                                 .font(.caption)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
@@ -152,11 +159,18 @@ struct ContentView: View {
                         .foregroundStyle(.tertiary)
                 }
             }
+
+            // Version
+            Text("v1.0.0")
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.quaternary)
         }
         .padding(24)
         .frame(minWidth: 400, idealWidth: 400, minHeight: 500, idealHeight: 700)
         .onAppear {
             sensor.start()
+            // Restore saved preset
+            selectedPreset = creakEngine.currentPreset
         }
         .onDisappear {
             sensor.stop()
@@ -185,6 +199,10 @@ struct ContentView: View {
             if case .success(let urls) = result, let url = urls.first {
                 if url.startAccessingSecurityScopedResource() {
                     creakEngine.loadFile(url: url)
+                    // Force picker to update the filename
+                    let current = selectedPreset
+                    selectedPreset = .metallicClick
+                    selectedPreset = current
                 }
             }
         }
