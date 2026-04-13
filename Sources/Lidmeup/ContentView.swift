@@ -237,6 +237,16 @@ struct SoundControlsView: View {
             ParamSlider(label: "Min Pitch", value: $minRate, range: 0.3...1.5, displayFormat: "%.2fx")
             ParamSlider(label: "Max Pitch", value: $maxRate, range: 0.5...3.0, displayFormat: "%.2fx")
             ParamSlider(label: "Sensitivity", value: $sensitivity, range: 1...50, unit: "\u{00B0}/s")
+
+            Button("Reset to Defaults") {
+                volume = 0.8
+                fadeSpeed = 20.0
+                minRate = 0.80
+                maxRate = 1.20
+                sensitivity = 10.0
+            }
+            .controlSize(.small)
+            .foregroundStyle(.red)
         }
         .padding(12)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
